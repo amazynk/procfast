@@ -40,6 +40,7 @@ Measured on a 16-core AMD system with ~700 processes, 10,000 iterations:
 | Process list (700 procs) | 4.5 ms | 0.13 ms | **35x** |
 | File descriptors (22k fds) | 57 ms | 4.9 ms | **12x** |
 | Sockets (2,300 sockets) | 2.5 ms | 0.34 ms | **7x** |
+| Cgroups (295 cgroups) | 3.4 ms | 0.05 ms | **67x** |
 
 Socket speedup scales with connection count — `/proc/net/tcp` walks the entire kernel hash table and formats each entry as text. On a loaded server with 50,000+ connections, this becomes a significant bottleneck.
 
@@ -82,6 +83,22 @@ procfastd (root)               procfast CLI / patched tools (any user with CAP_B
 | Processes | scheduler tracepoints + task iterator | `/proc/[pid]/stat` |
 | File descriptors | `fexit/do_sys_openat2` + `fentry/close_fd` + task_file iterator | `/proc/[pid]/fd/*` |
 | Sockets | `iter/tcp` + `iter/udp` + `iter/unix` BPF iterators | `/proc/net/tcp`, `/proc/net/udp`, `/proc/net/unix` |
+| Cgroups | `iter/cgroup` BPF iterator | `/sys/fs/cgroup/*/cpu.stat`, `memory.current` |
+
+### Cgroup support
+
+The cgroup collector (enabled with `procfastd --cgroup`) walks the entire cgroup v2 hierarchy via `iter/cgroup` and reads stats directly from kernel data structures. Per cgroup, it provides:
+
+- **CPU**: total/user/system usage, weight (shares), quota/period, throttle count and time
+- **Memory**: current usage, limit, swap usage
+- **PIDs**: current count and limit
+- **PSI**: cpu/memory/io pressure (some + full), cumulative microseconds
+- **Freeze**: effective frozen state
+- **Hierarchy**: id, parent id, name, level, descendant count (paths reconstructed in userspace)
+
+On a system with 295 cgroups, reading all stats takes 52 µs vs 3.4 ms via sysfs (67x faster). On a Kubernetes node with thousands of cgroups, the improvement is larger — each sysfs read involves a VFS open/read/close cycle plus text formatting.
+
+**Memory breakdown:** Per-cgroup cache and RSS are derived by aggregating per-process `mm->rss_stat` counters (which are always accurate) grouped by each process's `cgroup_id`. This works well for leaf cgroups where processes run. For parent cgroups, `memory.current` (from `page_counter.usage`, an atomic counter) shows the accurate hierarchical total. The kernel's `memcg_vmstats->state[]` breakdown (used by `memory.stat`) requires `cgroup_rstat_flush()` to aggregate percpu deltas, which BPF cannot trigger — see the Future hope section.
 
 ### Requirements
 
@@ -99,6 +116,7 @@ cargo build --release
 # Run daemon
 sudo ./target/release/procfastd          # basic metrics
 sudo ./target/release/procfastd --fd     # also track open files + sockets
+sudo ./target/release/procfastd --cgroup # also track cgroup stats
 
 # Query
 sudo ./target/release/procfast cpu       # per-CPU time breakdown
@@ -109,6 +127,7 @@ sudo ./target/release/procfast top       # live process view
 sudo ./target/release/procfast ps        # process list snapshot
 sudo ./target/release/procfast fd        # open file descriptors (needs --fd)
 sudo ./target/release/procfast sock      # TCP/UDP/Unix sockets (needs --fd)
+sudo ./target/release/procfast cgroup    # cgroup CPU/memory/PIDs (needs --cgroup)
 sudo ./target/release/procfast json cpu  # JSON output for scripting
 
 # Patched tools (after applying patches)
@@ -161,6 +180,8 @@ procfast works today, but it's more complex than it needs to be. Much of that co
 - **BPF iterators that write to maps directly.** Every BPF iterator that populates a map currently goes through a seq_file read dance — attach, create fd, read in a loop, discard output. The actual work happens in the callback. Letting iterators target maps directly would eliminate this overhead.
 
 - **Mmapable hash maps.** Only array maps support `BPF_F_MMAPABLE` today. Process and file descriptor data lives in hash maps, requiring batch syscalls instead of zero-copy mmap reads.
+
+- **BPF access to flushed cgroup memory stats.** Per-cgroup memory breakdown (`memory.stat` values like cache, RSS, slab) lives in `memcg_vmstats->state[]`, but this array only reflects data from the last `cgroup_rstat_flush()`. BPF programs cannot trigger this flush, and `bpf_per_cpu_ptr()` is rejected by the verifier on `memcg_vmstats_percpu` pointers, preventing direct percpu aggregation. A BPF helper like `bpf_cgroup_rstat_flush()` or allowing `bpf_per_cpu_ptr()` on memory cgroup percpu stats would let BPF programs read accurate per-cgroup memory breakdowns. Today, only `page_counter.usage` (the total) is always accurate from BPF — the detailed breakdown requires reading the text files.
 
 With these changes, procfast could shrink from eight BPF programs and several thousand lines of workaround code to something closer to: create a few kernel-provided maps, mmap them, read structured data. We'd welcome any of them.
 

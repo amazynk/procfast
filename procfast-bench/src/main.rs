@@ -58,6 +58,37 @@ fn bench_proc_sock(n: usize) -> Duration {
     start.elapsed()
 }
 
+fn bench_cgroup_sysfs(n: usize) -> (Duration, usize) {
+    // Discover cgroups under /sys/fs/cgroup
+    let mut cgroup_dirs = Vec::new();
+    fn walk_cgroups(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    out.push(path.clone());
+                    walk_cgroups(&path, out);
+                }
+            }
+        }
+    }
+    walk_cgroups(std::path::Path::new("/sys/fs/cgroup"), &mut cgroup_dirs);
+    let nr_cgroups = cgroup_dirs.len() + 1; // +1 for root
+
+    let start = Instant::now();
+    for _ in 0..n {
+        // Read root cgroup stats
+        let _ = fs::read_to_string("/sys/fs/cgroup/cpu.stat");
+        let _ = fs::read_to_string("/sys/fs/cgroup/memory.current");
+        // Read each sub-cgroup's stats
+        for dir in &cgroup_dirs {
+            let _ = fs::read_to_string(dir.join("cpu.stat"));
+            let _ = fs::read_to_string(dir.join("memory.current"));
+        }
+    }
+    (start.elapsed(), nr_cgroups)
+}
+
 fn bench<F: Fn()>(f: F, n: usize) -> Duration {
     let start = Instant::now();
     for _ in 0..n {
@@ -81,7 +112,7 @@ fn speedup(label: &str, proc_d: Duration, procfast_d: Option<Duration>) {
     }
 }
 
-const ALL: &[&str] = &["cpu", "mem", "net", "disk", "irq", "thermal", "proc", "fd", "sock"];
+const ALL: &[&str] = &["cpu", "mem", "net", "disk", "irq", "thermal", "proc", "fd", "sock", "cgroup"];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -105,7 +136,7 @@ fn main() {
                 println!("  procfast-bench [OPTIONS] [PARTS...]");
                 println!();
                 println!("PARTS (default: all):");
-                println!("  cpu mem net disk irq thermal proc fd sock");
+                println!("  cpu mem net disk irq thermal proc fd sock cgroup");
                 println!();
                 println!("OPTIONS:");
                 println!("  -n, --iterations N   Number of iterations (default: 10000)");
@@ -144,6 +175,9 @@ fn main() {
     let mut _proc_fd_count = 0;
     let mut proc_fd_iters = 0;
     let mut proc_sock = None;
+    let mut proc_cgroup_time = None;
+    let mut _proc_cgroup_count = 0;
+    let mut proc_cgroup_iters = 0;
 
     if want("cpu") {
         let d = bench_proc("/proc/stat", iterations);
@@ -206,12 +240,23 @@ fn main() {
             "/proc/net/tcp+udp+unix", us, d.as_millis());
         proc_sock = Some(d);
     }
+    if want("cgroup") {
+        let cg_iters = iterations.min(100); // walking cgroup tree is slow
+        let (d, n) = bench_cgroup_sysfs(cg_iters);
+        let us_per_scan = d.as_nanos() as f64 / cg_iters as f64 / 1000.0;
+        println!("  {:<20} {:>8.0} us/scan  ({:.1} ms, {} cgroups x {})",
+            "cgroup cpu+mem", us_per_scan, d.as_millis(), n, cg_iters);
+        proc_cgroup_time = Some(d);
+        _proc_cgroup_count = n;
+        proc_cgroup_iters = cg_iters;
+    }
 
     // procfast reads
     println!("\n=== procfast reads ===");
 
     let need_fd = want("fd") || want("sock");
-    let procfast = match procfast::ProcfastBuilder::new().fd(need_fd).build() {
+    let need_cgroup = want("cgroup");
+    let procfast = match procfast::ProcfastBuilder::new().fd(need_fd).cgroup(need_cgroup).build() {
         Ok(k) => k,
         Err(e) => {
             println!("  (skipped — BPF unavailable: {e})");
@@ -233,6 +278,8 @@ fn main() {
     let mut kd_fd = None;
     let mut procfast_fd_n = 0;
     let mut kd_sock = None;
+    let mut kd_cgroup = None;
+    let mut procfast_cgroup_n = 0;
 
     if want("cpu") {
         if let Some(c) = procfast.cpu() {
@@ -300,6 +347,15 @@ fn main() {
             kd_sock = Some(d);
         } else { println!("  procfast sock            (not loaded — run with fd(true))"); }
     }
+    if want("cgroup") {
+        if let Some(c) = procfast.cgroup() {
+            let snap = c.snapshot_all();
+            procfast_cgroup_n = snap.len();
+            let d = bench(|| { let _ = c.snapshot_all(); }, iterations);
+            report("procfast cgroup (all)", d, iterations);
+            kd_cgroup = Some(d);
+        } else { println!("  procfast cgroup          (not loaded — run with cgroup(true))"); }
+    }
 
     // Speedup summary
     println!("\n=== Speedup ===");
@@ -325,4 +381,10 @@ fn main() {
         println!("  {:<20} {:>6.0}x faster ({} fds)", "File descriptors", s, procfast_fd_n);
     }
     if let Some(pd) = proc_sock { speedup("Sockets", pd, kd_sock); }
+    if let (Some(pt), Some(kd)) = (proc_cgroup_time, kd_cgroup) {
+        let proc_per_scan = pt.as_nanos() as f64 / proc_cgroup_iters.max(1) as f64;
+        let procfast_per_scan = kd.as_nanos() as f64 / iterations as f64;
+        let s = proc_per_scan / procfast_per_scan.max(1.0);
+        println!("  {:<20} {:>6.0}x faster ({} cgroups)", "Cgroups", s, procfast_cgroup_n);
+    }
 }

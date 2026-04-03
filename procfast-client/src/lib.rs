@@ -135,6 +135,12 @@ impl ProcfastClient {
         Ok(SockReader { sock_map })
     }
 
+    /// Open the cgroup stats reader.
+    pub fn cgroup(&self) -> Result<CgroupReader, ClientError> {
+        let cgroup_map = open_pinned_map(&self.map_path("cgroup_entries"))?;
+        Ok(CgroupReader { cgroup_map })
+    }
+
     /// Open the process stats reader.
     pub fn proc_stats(&self) -> Result<ProcReader, ClientError> {
         let header = MmapReader::open(&self.map_path("proc_header"))?;
@@ -479,6 +485,27 @@ impl SockReader {
             }
         }
         socks
+    }
+}
+
+pub struct CgroupReader {
+    cgroup_map: MapHandle,
+}
+
+impl CgroupReader {
+    /// Get all cgroup stats.
+    pub fn snapshot_all(&self) -> Vec<CgroupStats> {
+        let val_size = std::mem::size_of::<CgroupStats>();
+        let mut cgroups = Vec::new();
+        for key in self.cgroup_map.keys() {
+            if let Ok(Some(value)) = self.cgroup_map.lookup(&key, MapFlags::ANY) {
+                if value.len() == val_size {
+                    let info: &CgroupStats = bytemuck::from_bytes(&value);
+                    cgroups.push(*info);
+                }
+            }
+        }
+        cgroups
     }
 }
 

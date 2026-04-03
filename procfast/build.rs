@@ -2,7 +2,7 @@ use libbpf_cargo::SkeletonBuilder;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-const BPF_PROGRAMS: &[&str] = &["cpu", "mem", "net", "disk", "thermal", "irq", "proc", "fd", "sock"];
+const BPF_PROGRAMS: &[&str] = &["cpu", "mem", "net", "disk", "thermal", "irq", "proc", "fd", "sock", "cgroup"];
 
 fn main() {
     let bpf_src = Path::new("../procfast-bpf/src");

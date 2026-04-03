@@ -21,6 +21,7 @@ pub const MAX_IRQS: usize = 512;
 pub const MAX_PROCS: usize = 8192;
 pub const MAX_FDS: usize = 65536;
 pub const MAX_FD_PATH: usize = 256;
+pub const MAX_CGROUPS: usize = 4096;
 
 /// Per-CPU time accounting in nanoseconds.
 #[repr(C)]
@@ -256,6 +257,8 @@ pub struct ProcStats {
     pub cpu_runtime_ns: u64,
     /// Process start time (monotonic ns since boot).
     pub start_time_ns: u64,
+    /// Cgroup v2 default hierarchy ID (for aggregating per-cgroup stats).
+    pub cgroup_id: u64,
 }
 
 impl Default for ProcStats {
@@ -347,6 +350,87 @@ pub struct SockInfo {
 }
 
 impl Default for SockInfo {
+    fn default() -> Self {
+        Zeroable::zeroed()
+    }
+}
+
+/// Per-cgroup statistics. Replaces reading `/sys/fs/cgroup/<path>/cpu.stat`,
+/// `memory.current`, `memory.stat`, `cpu.pressure`, etc.
+///
+/// Populated by iter/cgroup which walks the kernel cgroup hierarchy
+/// and reads stats directly from kernel data structures.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct CgroupStats {
+    /// Cgroup ID (kernfs node inode number).
+    pub id: u64,
+    /// Parent cgroup ID (for path reconstruction).
+    pub parent_id: u64,
+    /// Depth in the cgroup hierarchy (0 = root).
+    pub level: u32,
+    /// Number of descendant sub-cgroups.
+    pub nr_descendants: u32,
+    // CPU
+    /// Total CPU usage in nanoseconds (sum_exec_runtime).
+    pub cpu_usage_ns: u64,
+    /// CPU time in user mode (nanoseconds).
+    pub cpu_user_ns: u64,
+    /// CPU time in kernel mode (nanoseconds).
+    pub cpu_system_ns: u64,
+    /// CPU quota in microseconds per period (0 = no limit).
+    pub cpu_quota_us: u64,
+    /// CPU period in microseconds.
+    pub cpu_period_us: u64,
+    /// CPU weight (shares).
+    pub cpu_weight: u32,
+    /// Number of times the cgroup was throttled.
+    pub nr_throttled: u32,
+    /// Total time spent throttled (nanoseconds).
+    pub throttled_ns: u64,
+    // Memory
+    /// Current memory usage in bytes.
+    pub memory_current: u64,
+    /// Memory limit in bytes (0 = no limit).
+    pub memory_limit: u64,
+    /// Swap usage in bytes.
+    pub memory_swap: u64,
+    /// File-backed (cache) pages in bytes.
+    pub memory_cache: u64,
+    /// Anonymous + mapped pages (RSS) in bytes.
+    pub memory_rss: u64,
+    /// Slab memory in bytes.
+    pub memory_slab: u64,
+    /// Shared memory in bytes.
+    pub memory_shmem: u64,
+    // PIDs
+    /// Current number of PIDs in this cgroup.
+    pub nr_pids: u64,
+    /// Maximum PIDs allowed (0 = no limit).
+    pub pids_limit: u64,
+    // PSI — cumulative stall time in microseconds
+    /// CPU some pressure (at least one task stalled).
+    pub psi_cpu_some: u64,
+    /// CPU full pressure (all tasks stalled).
+    pub psi_cpu_full: u64,
+    /// Memory some pressure.
+    pub psi_mem_some: u64,
+    /// Memory full pressure.
+    pub psi_mem_full: u64,
+    /// I/O some pressure.
+    pub psi_io_some: u64,
+    /// I/O full pressure.
+    pub psi_io_full: u64,
+    // Freeze
+    /// Whether the cgroup is effectively frozen.
+    pub frozen: u8,
+    pub _pad1: [u8; 7],
+    // Name and path
+    /// Cgroup name (leaf path component).
+    pub name: [u8; 64],
+}
+
+impl Default for CgroupStats {
     fn default() -> Self {
         Zeroable::zeroed()
     }

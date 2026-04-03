@@ -23,6 +23,7 @@ fn main() {
     log::info!("Loading BPF programs...");
     let procfast = ProcfastBuilder::new()
         .interval_ms(args.interval_ms)
+        .cgroup(args.enable_cgroup)
         .build()
         .unwrap_or_else(|e| {
             eprintln!("error: {e}");
@@ -75,6 +76,7 @@ fn render_metrics(procfast: &Procfast) -> String {
     render_irq(procfast, &mut out);
     render_thermal(procfast, &mut out);
     render_proc(procfast, &mut out);
+    render_cgroup(procfast, &mut out);
 
     String::from_utf8(out).unwrap_or_default()
 }
@@ -274,6 +276,62 @@ fn render_proc(procfast: &Procfast, out: &mut Vec<u8>) {
     }
 }
 
+fn render_cgroup(procfast: &Procfast, out: &mut Vec<u8>) {
+    let cgroup = match procfast.cgroup() {
+        Some(c) => c,
+        None => return,
+    };
+    let cgroups = cgroup.snapshot_all();
+
+    writeln!(out, "# HELP procfast_cgroup_cpu_usage_seconds_total Cgroup CPU usage in seconds.").unwrap();
+    writeln!(out, "# TYPE procfast_cgroup_cpu_usage_seconds_total counter").unwrap();
+    writeln!(out, "# HELP procfast_cgroup_memory_current_bytes Cgroup current memory usage in bytes.").unwrap();
+    writeln!(out, "# TYPE procfast_cgroup_memory_current_bytes gauge").unwrap();
+    writeln!(out, "# HELP procfast_cgroup_memory_limit_bytes Cgroup memory limit in bytes.").unwrap();
+    writeln!(out, "# TYPE procfast_cgroup_memory_limit_bytes gauge").unwrap();
+    writeln!(out, "# HELP procfast_cgroup_pids_current Current number of PIDs in cgroup.").unwrap();
+    writeln!(out, "# TYPE procfast_cgroup_pids_current gauge").unwrap();
+    writeln!(out, "# HELP procfast_cgroup_throttled_total Number of times cgroup was CPU-throttled.").unwrap();
+    writeln!(out, "# TYPE procfast_cgroup_throttled_total counter").unwrap();
+    writeln!(out, "# HELP procfast_cgroup_psi_seconds_total Cgroup PSI stall time in seconds.").unwrap();
+    writeln!(out, "# TYPE procfast_cgroup_psi_seconds_total counter").unwrap();
+
+    for cg in &cgroups {
+        let name = bytes_to_str(&cg.name);
+        if name.is_empty() { continue; }
+        let label = format!("cgroup=\"{name}\",id=\"{}\"", cg.id);
+
+        writeln!(out, "procfast_cgroup_cpu_usage_seconds_total{{{label}}} {:.6}",
+            cg.cpu_usage_ns as f64 / 1e9).unwrap();
+        writeln!(out, "procfast_cgroup_memory_current_bytes{{{label}}} {}",
+            cg.memory_current).unwrap();
+        if cg.memory_limit > 0 {
+            writeln!(out, "procfast_cgroup_memory_limit_bytes{{{label}}} {}",
+                cg.memory_limit).unwrap();
+        }
+        if cg.nr_pids > 0 {
+            writeln!(out, "procfast_cgroup_pids_current{{{label}}} {}",
+                cg.nr_pids).unwrap();
+        }
+        if cg.nr_throttled > 0 {
+            writeln!(out, "procfast_cgroup_throttled_total{{{label}}} {}",
+                cg.nr_throttled).unwrap();
+        }
+        if cg.psi_cpu_some > 0 {
+            writeln!(out, "procfast_cgroup_psi_seconds_total{{{label},resource=\"cpu\",type=\"some\"}} {:.6}",
+                cg.psi_cpu_some as f64 / 1e6).unwrap();
+        }
+        if cg.psi_mem_some > 0 {
+            writeln!(out, "procfast_cgroup_psi_seconds_total{{{label},resource=\"memory\",type=\"some\"}} {:.6}",
+                cg.psi_mem_some as f64 / 1e6).unwrap();
+        }
+        if cg.psi_io_some > 0 {
+            writeln!(out, "procfast_cgroup_psi_seconds_total{{{label},resource=\"io\",type=\"some\"}} {:.6}",
+                cg.psi_io_some as f64 / 1e6).unwrap();
+        }
+    }
+}
+
 fn bytes_to_str(b: &[u8]) -> &str {
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     std::str::from_utf8(&b[..end]).unwrap_or("?")
@@ -282,10 +340,11 @@ fn bytes_to_str(b: &[u8]) -> &str {
 struct Args {
     port: u16,
     interval_ms: u64,
+    enable_cgroup: bool,
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { port: 9099, interval_ms: 1000 };
+    let mut args = Args { port: 9099, interval_ms: 1000, enable_cgroup: false };
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < argv.len() {
@@ -298,6 +357,9 @@ fn parse_args() -> Args {
                 i += 1;
                 args.interval_ms = argv.get(i).and_then(|s| s.parse().ok()).unwrap_or(1000);
             }
+            "--cgroup" => {
+                args.enable_cgroup = true;
+            }
             "-h" | "--help" => {
                 println!("procfast-exporter — Prometheus exporter for procfast metrics");
                 println!();
@@ -307,6 +369,7 @@ fn parse_args() -> Args {
                 println!("OPTIONS:");
                 println!("  -p, --port <port>      HTTP port (default: 9099)");
                 println!("  -i, --interval <ms>    BPF collection interval (default: 1000)");
+                println!("      --cgroup           Enable cgroup metrics");
                 std::process::exit(0);
             }
             _ => {}

@@ -24,8 +24,8 @@ check() {
     fi
 }
 
-echo "=== Starting procfastd --fd ==="
-$PROCFASTD --fd &
+echo "=== Starting procfastd --fd --cgroup ==="
+$PROCFASTD --fd --cgroup &
 DAEMON_PID=$!
 sleep 3
 
@@ -87,6 +87,14 @@ check "Socket: shows connections" \
     "$PROCFAST sock | grep -c tcp" \
     "[0-9]+"
 
+check "Cgroup: shows hierarchy" \
+    "$PROCFAST cgroup | head -5" \
+    "Memory"
+
+check "Cgroup: has user.slice" \
+    "$PROCFAST cgroup | grep user.slice" \
+    "user.slice"
+
 echo ""
 echo "=== Output format tests ==="
 
@@ -104,6 +112,10 @@ check "JSON ps" \
 
 check "JSON sock" \
     "$PROCFAST json sock | head -1" \
+    "^\{"
+
+check "JSON cgroup" \
+    "$PROCFAST json cgroup | head -1" \
     "^\{"
 
 check "Top: shows header" \

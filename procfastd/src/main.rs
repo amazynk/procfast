@@ -36,6 +36,7 @@ fn main() {
         .interval_ms(args.interval_ms)
         .proc_stats(args.enable_proc)
         .fd(args.enable_fd)
+        .cgroup(args.enable_cgroup)
         .pin_path(&args.pin_path)
         .public(args.public)
         .build()
@@ -58,8 +59,9 @@ fn main() {
         .expect("failed to register SIGTERM handler");
 
     log::info!("procfastd ready. Clients can connect via: {}", args.pin_path);
-    log::info!("Collectors: cpu, mem, net, disk, thermal, irq{}",
-        if args.enable_proc { ", proc" } else { "" });
+    log::info!("Collectors: cpu, mem, net, disk, thermal, irq{}{}",
+        if args.enable_proc { ", proc" } else { "" },
+        if args.enable_cgroup { ", cgroup" } else { "" });
     log::info!("Interval: {}ms", args.interval_ms);
 
     // Notify systemd we're ready (if running as a systemd service)
@@ -84,6 +86,7 @@ struct Args {
     pin_path: String,
     enable_proc: bool,
     enable_fd: bool,
+    enable_cgroup: bool,
     public: bool,
 }
 
@@ -93,6 +96,7 @@ fn parse_args() -> Args {
         pin_path: pin::DEFAULT_PIN_PATH.to_string(),
         enable_proc: true,
         enable_fd: false,
+        enable_cgroup: false,
         public: true,
     };
 
@@ -117,6 +121,9 @@ fn parse_args() -> Args {
             "--fd" => {
                 args.enable_fd = true;
             }
+            "--cgroup" => {
+                args.enable_cgroup = true;
+            }
             "--no-public" => {
                 args.public = false;
             }
@@ -136,6 +143,7 @@ fn parse_args() -> Args {
                 println!("  -p, --pin-path <path>  BPF map pin directory (default: {0})", pin::DEFAULT_PIN_PATH);
                 println!("      --no-proc          Disable per-process tracking (most expensive collector)");
                 println!("      --fd               Enable fd + socket tracking (for lsof/ss)");
+                println!("      --cgroup           Enable cgroup stats (CPU + memory per cgroup)");
                 println!("      --no-public        Restrict map access to root only");
                 println!("  -h, --help             Show this help");
                 println!();
@@ -149,6 +157,7 @@ fn parse_args() -> Args {
                 println!("  proc      Process stats via scheduler tracepoints (disable: --no-proc)");
                 println!("  fd        File descriptors via openat/close hooks (enable: --fd)");
                 println!("  sock      TCP/UDP/Unix sockets via BPF iterators (with --fd)");
+                println!("  cgroup    Cgroup CPU + memory stats via BPF iterator (enable: --cgroup)");
                 println!();
                 println!("EXAMPLES:");
                 println!("  sudo procfastd                    # start with defaults");

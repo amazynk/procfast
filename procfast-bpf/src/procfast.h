@@ -15,6 +15,7 @@
 #define PROCFAST_MAX_PROCS       8192
 #define PROCFAST_MAX_FDS        65536
 #define PROCFAST_MAX_FD_PATH      256
+#define PROCFAST_MAX_CGROUPS     4096
 
 struct procfast_cpu_stats {
 	__u64 user_ns;
@@ -156,6 +157,7 @@ struct procfast_proc_stats {
 	__u64 write_bytes;
 	__u64 cpu_runtime_ns;
 	__u64 start_time_ns;
+	__u64 cgroup_id;      /* cgroup v2 default hierarchy ID */
 };
 
 struct procfast_proc_header {
@@ -177,6 +179,45 @@ struct procfast_fd_info {
 	__u32 flags;
 	__u32 _pad;
 	char path[PROCFAST_MAX_FD_PATH];
+};
+
+struct procfast_cgroup_stats {
+	__u64 id;             /* cgroup ID (kernfs inode) */
+	__u64 parent_id;      /* parent cgroup ID */
+	__u32 level;          /* depth in hierarchy */
+	__u32 nr_descendants; /* number of sub-cgroups */
+	/* CPU */
+	__u64 cpu_usage_ns;   /* total CPU (sum_exec_runtime) */
+	__u64 cpu_user_ns;    /* user CPU time */
+	__u64 cpu_system_ns;  /* system CPU time */
+	__u64 cpu_quota_us;   /* cpu.max quota (µs per period), 0 = no limit */
+	__u64 cpu_period_us;  /* cpu.max period (µs) */
+	__u32 cpu_weight;     /* cpu.weight (shares) */
+	__u32 nr_throttled;   /* nr times cgroup was throttled */
+	__u64 throttled_ns;   /* total time throttled (ns) */
+	/* Memory */
+	__u64 memory_current; /* current memory usage (bytes) */
+	__u64 memory_limit;   /* memory limit (bytes), 0 = no limit */
+	__u64 memory_swap;    /* swap usage (bytes) */
+	__u64 memory_cache;   /* file-backed pages (bytes) */
+	__u64 memory_rss;     /* anonymous + mapped pages (bytes) */
+	__u64 memory_slab;    /* slab reclaimable + unreclaimable (bytes) */
+	__u64 memory_shmem;   /* shared memory (bytes) */
+	/* PIDs */
+	__u64 nr_pids;        /* current number of PIDs */
+	__u64 pids_limit;     /* max PIDs, 0 = no limit */
+	/* PSI — cumulative stall time (µs) */
+	__u64 psi_cpu_some;   /* CPU some pressure */
+	__u64 psi_cpu_full;   /* CPU full pressure */
+	__u64 psi_mem_some;   /* memory some pressure */
+	__u64 psi_mem_full;   /* memory full pressure */
+	__u64 psi_io_some;    /* I/O some pressure */
+	__u64 psi_io_full;    /* I/O full pressure */
+	/* Freeze */
+	__u8  frozen;         /* effective freeze state */
+	__u8  _pad1[7];
+	/* Name */
+	char  name[64];       /* cgroup name (leaf component) */
 };
 
 /* CLOCK_MONOTONIC is a userspace constant not in vmlinux.h */

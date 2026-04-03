@@ -11,6 +11,7 @@
 //! - `CAP_BPF` and `CAP_PERFMON` capabilities (or root)
 //! - BTF enabled (`CONFIG_DEBUG_INFO_BTF=y`)
 
+pub mod cgroup;
 pub mod collector;
 pub mod cpu;
 pub mod disk;
@@ -27,6 +28,7 @@ pub mod thermal;
 mod fallback;
 pub mod seed;
 
+pub use cgroup::CgroupCollector;
 pub use cpu::CpuCollector;
 pub use disk::DiskCollector;
 pub use error::ProcfastError;
@@ -70,6 +72,9 @@ mod skel {
     pub mod sock {
         include!(concat!(env!("OUT_DIR"), "/skel/sock.skel.rs"));
     }
+    pub mod cgroup {
+        include!(concat!(env!("OUT_DIR"), "/skel/cgroup.skel.rs"));
+    }
 }
 
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
@@ -90,6 +95,7 @@ pub struct Procfast {
     proc: Option<ProcCollector>,
     fd: Option<FdCollector>,
     sock: Option<SockCollector>,
+    cgroup: Option<CgroupCollector>,
     // Box the storage so it has a stable address and lives as long as Procfast.
     _storage: Box<SkelStorage>,
     // BPF program attachment links. Dropping a Link detaches the program,
@@ -110,6 +116,7 @@ struct SkelStorage {
     _proc_obj: MaybeUninit<libbpf_rs::OpenObject>,
     _fd_obj: MaybeUninit<libbpf_rs::OpenObject>,
     _sock_obj: MaybeUninit<libbpf_rs::OpenObject>,
+    _cgroup_obj: MaybeUninit<libbpf_rs::OpenObject>,
 }
 
 impl Procfast {
@@ -122,6 +129,7 @@ impl Procfast {
     pub fn proc_stats(&self) -> Option<&ProcCollector> { self.proc.as_ref() }
     pub fn fd(&self) -> Option<&FdCollector> { self.fd.as_ref() }
     pub fn sock(&self) -> Option<&SockCollector> { self.sock.as_ref() }
+    pub fn cgroup(&self) -> Option<&CgroupCollector> { self.cgroup.as_ref() }
 }
 
 /// Builder for configuring which metrics to collect and at what interval.
@@ -135,6 +143,7 @@ pub struct ProcfastBuilder {
     enable_irq: bool,
     enable_proc: bool,
     enable_fd: bool,
+    enable_cgroup: bool,
     interval_ms: u64,
     allow_fallback: bool,
     pin_path: Option<String>,
@@ -156,6 +165,7 @@ impl ProcfastBuilder {
             enable_irq: true,
             enable_proc: true,
             enable_fd: false,
+            enable_cgroup: false,
             interval_ms: 100,
             allow_fallback: false,
             pin_path: None,
@@ -171,6 +181,7 @@ impl ProcfastBuilder {
     pub fn irq(mut self, enable: bool) -> Self { self.enable_irq = enable; self }
     pub fn proc_stats(mut self, enable: bool) -> Self { self.enable_proc = enable; self }
     pub fn fd(mut self, enable: bool) -> Self { self.enable_fd = enable; self }
+    pub fn cgroup(mut self, enable: bool) -> Self { self.enable_cgroup = enable; self }
     pub fn interval_ms(mut self, ms: u64) -> Self { self.interval_ms = ms; self }
     pub fn allow_fallback(mut self, allow: bool) -> Self { self.allow_fallback = allow; self }
 
@@ -214,6 +225,7 @@ impl ProcfastBuilder {
             _proc_obj: MaybeUninit::uninit(),
             _fd_obj: MaybeUninit::uninit(),
             _sock_obj: MaybeUninit::uninit(),
+            _cgroup_obj: MaybeUninit::uninit(),
         });
 
         let mut cpu_collector = None;
@@ -225,6 +237,7 @@ impl ProcfastBuilder {
         let mut proc_collector = None;
         let mut fd_collector = None;
         let mut sock_collector = None;
+        let mut cgroup_collector = None;
         let mut links: Vec<libbpf_rs::Link> = Vec::new();
 
         if self.enable_cpu {
@@ -534,6 +547,73 @@ impl ProcfastBuilder {
             }
         }
 
+        // Cgroup iterator — enumerate all cgroups and read CPU/memory stats
+        if self.enable_cgroup {
+            match (|| -> Result<_, ProcfastError> {
+                let builder = skel::cgroup::CgroupSkelBuilder::default();
+                let open = builder.open(&mut storage._cgroup_obj)
+                    .map_err(|e| ProcfastError::BpfLoad(e.to_string()))?;
+                let mut skel = open.load()
+                    .map_err(|e| ProcfastError::BpfLoad(e.to_string()))?;
+
+                let cgroup_handle = MapHandle::try_from(&skel.maps.cgroup_entries)
+                    .map_err(|e| ProcfastError::BpfLoad(format!("MapHandle for cgroup_entries: {e}")))?;
+
+                // Trigger cgroup_rstat_flush() so vmstats are up to date.
+                // Reading the root cgroup's memory.stat flushes the entire hierarchy.
+                let _ = std::fs::read_to_string("/sys/fs/cgroup/memory.stat");
+
+                // Run cgroup iterator to populate map.
+                // iter/cgroup requires specifying traversal order and root cgroup
+                // via bpf_link_create with iter_info, not simple attach().
+                let cgroup_fd = unsafe {
+                    libc::open(b"/sys/fs/cgroup\0".as_ptr() as *const _, libc::O_RDONLY | libc::O_DIRECTORY)
+                };
+                if cgroup_fd < 0 {
+                    return Err(ProcfastError::BpfLoad("cannot open /sys/fs/cgroup".to_string()));
+                }
+                let prog_fd = skel.progs.procfast_iter_cgroup.as_fd().as_raw_fd();
+                // BPF_CGROUP_ITER_DESCENDANTS_PRE = 2
+                let mut iter_info: libbpf_rs::libbpf_sys::bpf_iter_link_info = unsafe { std::mem::zeroed() };
+                iter_info.cgroup.order = 2; // BPF_CGROUP_ITER_DESCENDANTS_PRE
+                iter_info.cgroup.cgroup_fd = cgroup_fd as u32;
+
+                let mut link_opts: libbpf_rs::libbpf_sys::bpf_link_create_opts = unsafe { std::mem::zeroed() };
+                link_opts.sz = std::mem::size_of::<libbpf_rs::libbpf_sys::bpf_link_create_opts>() as libbpf_rs::libbpf_sys::size_t;
+                link_opts.iter_info = &iter_info as *const _ as *mut _;
+                link_opts.iter_info_len = std::mem::size_of::<libbpf_rs::libbpf_sys::bpf_iter_link_info>() as u32;
+
+                let link_fd = unsafe {
+                    libbpf_rs::libbpf_sys::bpf_link_create(
+                        prog_fd, 0, libbpf_rs::libbpf_sys::BPF_TRACE_ITER, &link_opts)
+                };
+                unsafe { libc::close(cgroup_fd); }
+
+                if link_fd < 0 {
+                    return Err(ProcfastError::BpfLoad(format!(
+                        "bpf_link_create for iter/cgroup: {}", std::io::Error::last_os_error())));
+                }
+
+                let cgroup_iter_fd = unsafe { libbpf_rs::libbpf_sys::bpf_iter_create(link_fd) };
+                if cgroup_iter_fd >= 0 {
+                    let mut f = unsafe { std::fs::File::from_raw_fd(cgroup_iter_fd) };
+                    let mut buf = [0u8; 4096];
+                    loop { match f.read(&mut buf) { Ok(0) | Err(_) => break, _ => {} } }
+                }
+                unsafe { libc::close(link_fd); }
+
+                let c = CgroupCollector::new(cgroup_handle);
+                if let Some(ref dir) = self.pin_path {
+                    pin_map(&mut skel.maps.cgroup_entries, dir, "cgroup_entries")?;
+                }
+                std::mem::forget(skel);
+                Ok(c)
+            })() {
+                Ok(c) => cgroup_collector = Some(c),
+                Err(e) => log::warn!("cgroup collector unavailable: {e}"),
+            }
+        }
+
         // Seed collectors by reading /proc and /sys once to populate
         // BPF maps with existing data. Tracepoints then keep them updated.
         if mem_collector.is_some() { seed::seed_mem(); }
@@ -562,6 +642,7 @@ impl ProcfastBuilder {
             proc: proc_collector,
             fd: fd_collector,
             sock: sock_collector,
+            cgroup: cgroup_collector,
             _storage: storage,
             _links: links,
         })

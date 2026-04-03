@@ -106,6 +106,40 @@ struct procfast_proc_stats {
     uint64_t read_bytes, write_bytes;
     uint64_t cpu_runtime_ns;
     uint64_t start_time_ns;
+    uint64_t cgroup_id;
+};
+
+struct procfast_cgroup_stats {
+    uint64_t id;
+    uint64_t parent_id;
+    uint32_t level;
+    uint32_t nr_descendants;
+    uint64_t cpu_usage_ns;
+    uint64_t cpu_user_ns;
+    uint64_t cpu_system_ns;
+    uint64_t cpu_quota_us;
+    uint64_t cpu_period_us;
+    uint32_t cpu_weight;
+    uint32_t nr_throttled;
+    uint64_t throttled_ns;
+    uint64_t memory_current;
+    uint64_t memory_limit;
+    uint64_t memory_swap;
+    uint64_t memory_cache;
+    uint64_t memory_rss;
+    uint64_t memory_slab;
+    uint64_t memory_shmem;
+    uint64_t nr_pids;
+    uint64_t pids_limit;
+    uint64_t psi_cpu_some;
+    uint64_t psi_cpu_full;
+    uint64_t psi_mem_some;
+    uint64_t psi_mem_full;
+    uint64_t psi_io_some;
+    uint64_t psi_io_full;
+    uint8_t  frozen;
+    uint8_t  _pad1[7];
+    char     name[64];
 };
 
 struct procfast_proc_header {
@@ -157,15 +191,17 @@ struct procfast_handle {
     int proc_stats_fd;
     int fd_entries_fd;
     int sock_entries_fd;
-    int available;  /* bitmask: 1=cpu, 2=mem, 4=net, 8=proc, 16=fd, 32=sock */
+    int cgroup_entries_fd;
+    int available;  /* bitmask: 1=cpu, 2=mem, 4=net, 8=proc, 16=fd, 32=sock, 64=cgroup */
 };
 
-#define PROCFAST_HAS_CPU  1
-#define PROCFAST_HAS_MEM  2
-#define PROCFAST_HAS_NET  4
-#define PROCFAST_HAS_PROC 8
-#define PROCFAST_HAS_FD   16
-#define PROCFAST_HAS_SOCK 32
+#define PROCFAST_HAS_CPU    1
+#define PROCFAST_HAS_MEM    2
+#define PROCFAST_HAS_NET    4
+#define PROCFAST_HAS_PROC   8
+#define PROCFAST_HAS_FD    16
+#define PROCFAST_HAS_SOCK  32
+#define PROCFAST_HAS_CGROUP 64
 
 /* ---- Internal helpers ---- */
 
@@ -242,6 +278,7 @@ static inline struct procfast_handle *procfast_open(const char *pin_dir) {
     h->proc_stats_fd = -1;
     h->fd_entries_fd = -1;
     h->sock_entries_fd = -1;
+    h->cgroup_entries_fd = -1;
     h->available = 0;
 
     if (procfast__open_map(pin_dir, "cpu_data", &h->cpu,
@@ -281,6 +318,14 @@ static inline struct procfast_handle *procfast_open(const char *pin_dir) {
             h->available |= PROCFAST_HAS_SOCK;
     }
 
+    {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/cgroup_entries", pin_dir);
+        h->cgroup_entries_fd = procfast__bpf_obj_get(path);
+        if (h->cgroup_entries_fd >= 0)
+            h->available |= PROCFAST_HAS_CGROUP;
+    }
+
     if (h->available == 0) {
         free(h);
         return NULL;
@@ -299,6 +344,7 @@ static inline void procfast_close(struct procfast_handle *h) {
     if (h->proc_stats_fd >= 0) close(h->proc_stats_fd);
     if (h->fd_entries_fd >= 0) close(h->fd_entries_fd);
     if (h->sock_entries_fd >= 0) close(h->sock_entries_fd);
+    if (h->cgroup_entries_fd >= 0) close(h->cgroup_entries_fd);
     free(h);
 }
 
@@ -517,6 +563,71 @@ static inline int procfast_read_sock(struct procfast_handle *h, uint64_t inode,
     attr.value = (uint64_t)(unsigned long)out;
 
     return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
+}
+
+/**
+ * Read all cgroup stats via batch lookup.
+ * Allocates *out_cgroups (caller must free). Returns count, or -1 on error.
+ */
+static inline int procfast_read_cgroups(struct procfast_handle *h,
+                                        struct procfast_cgroup_stats **out_cgroups) {
+    if (!procfast_has(h, PROCFAST_HAS_CGROUP)) return -1;
+
+    size_t capacity = 512;
+    struct procfast_cgroup_stats *cgroups = (struct procfast_cgroup_stats *)
+        malloc(capacity * sizeof(struct procfast_cgroup_stats));
+    if (!cgroups) return -1;
+
+    int fd = h->cgroup_entries_fd;
+    uint32_t batch = 256;
+
+    uint64_t *keys = (uint64_t *)malloc(batch * sizeof(uint64_t));
+    struct procfast_cgroup_stats *vals = (struct procfast_cgroup_stats *)
+        malloc(batch * sizeof(struct procfast_cgroup_stats));
+    if (!keys || !vals) {
+        free(keys); free(vals); free(cgroups);
+        return -1;
+    }
+
+    int total = 0;
+    uint64_t in_batch = 0, out_batch = 0;
+    int first = 1;
+
+    for (;;) {
+        uint32_t count = batch;
+
+        union bpf_attr attr;
+        memset(&attr, 0, sizeof(attr));
+        attr.batch.map_fd = fd;
+        attr.batch.in_batch = first ? 0 : (uint64_t)(unsigned long)&in_batch;
+        attr.batch.out_batch = (uint64_t)(unsigned long)&out_batch;
+        attr.batch.keys = (uint64_t)(unsigned long)keys;
+        attr.batch.values = (uint64_t)(unsigned long)vals;
+        attr.batch.count = count;
+
+        int ret = (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_BATCH,
+                               &attr, sizeof(attr));
+        count = attr.batch.count;
+        first = 0;
+
+        for (uint32_t i = 0; i < count; i++) {
+            if ((size_t)total >= capacity) {
+                capacity *= 2;
+                cgroups = (struct procfast_cgroup_stats *)
+                    realloc(cgroups, capacity * sizeof(*cgroups));
+                if (!cgroups) { free(keys); free(vals); return -1; }
+            }
+            cgroups[total++] = vals[i];
+        }
+
+        in_batch = out_batch;
+        if (ret != 0) break;
+    }
+
+    free(keys);
+    free(vals);
+    *out_cgroups = cgroups;
+    return total;
 }
 
 #ifdef __cplusplus

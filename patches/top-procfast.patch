@@ -1,1258 +1,1130 @@
-Makefile.am --- Text (228 Make parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-306 306         local/capnames.h \
-307 307     library/devname.c \
-308 308     library/include/devname.h \
-... 309     library/procfast_data.c \
-... 310     library/include/procfast_data.h \
-... 311     library/include/procfast_client.h \
-309 312     library/diskstats.c \
-310 313     library/include/diskstats.h \
-311 314     library/escape.c \
-
-library/include/procfast_client.h --- Text (2 C++ parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-  1 /*
-  2  * procfast_client.h — Single-header C library for reading procfast metrics.
-  3  *
-  4  * Drop this file into any C/C++ project. No external dependencies
-  5  * beyond Linux headers. Reads data from procfast's pinned BPF maps.
-  6  *
-  7  * Usage:
-  8  *   struct procfast_handle *procfast = procfast_open("/sys/fs/bpf/procfast");
-  9  *   if (!procfast) { ... procfast not running ... }
- 10  *
- 11  *   struct procfast_cpu_data cpu;
- 12  *   procfast_read_cpu(procfast, &cpu);
- 13  *   printf("CPUs: %u\n", cpu.nr_cpus);
- 14  *
- 15  *   struct procfast_proc_stats *procs;
- 16  *   int n = procfast_read_procs(procfast, &procs);
- 17  *   for (int i = 0; i < n; i++)
- 18  *       printf("%d %s\n", procs[i].pid, procs[i].comm);
- 19  *   free(procs);
- 20  *
- 21  *   procfast_close(procfast);
- 22  *
- 23  * SPDX-License-Identifier: MIT OR Apache-2.0
- 24  */
- 25 
- 26 #ifndef PROCFAST_CLIENT_H
- 27 #define PROCFAST_CLIENT_H
- 28 
- 29 #include <stdint.h>
- 30 #include <stdio.h>
- 31 #include <string.h>
- 32 #include <stdlib.h>
- 33 #include <unistd.h>
- 34 #include <errno.h>
- 35 #include <fcntl.h>
- 36 #include <sys/mman.h>
- 37 #include <sys/stat.h>
- 38 #include <linux/bpf.h>
- 39 #include <sys/syscall.h>
- 40 
- 41 #ifdef __cplusplus
- 42 extern "C" {
- 43 #endif
- 44 
- 45 /* ---- Data structures (must match procfast-common/src/lib.rs) ---- */
- 46 
- 47 #define PROCFAST_MAX_CPUS         256
- 48 #define PROCFAST_MAX_NET_DEVS      32
- 49 #define PROCFAST_MAX_DISKS         64
- 50 #define PROCFAST_MAX_THERMAL_ZONES 16
- 51 #define PROCFAST_MAX_IRQS         512
- 52 #define PROCFAST_MAX_FDS        65536
- 53 #define PROCFAST_MAX_FD_PATH      256
- 54 
- 55 struct procfast_cpu_stats {
- 56     uint64_t user_ns, nice_ns, system_ns, idle_ns;
- 57     uint64_t iowait_ns, irq_ns, softirq_ns, steal_ns;
- 58     uint64_t guest_ns, guest_nice_ns;
- 59 };
- 60 
- 61 struct procfast_cpu_data {
- 62     uint64_t seq;
- 63     uint64_t timestamp_ns;
- 64     uint32_t nr_cpus;
- 65     uint32_t _pad;
- 66     struct procfast_cpu_stats total;
- 67     struct procfast_cpu_stats per_cpu[PROCFAST_MAX_CPUS];
- 68 };
- 69 
- 70 struct procfast_mem_data {
- 71     uint64_t seq;
- 72     uint64_t timestamp_ns;
- 73     uint64_t total_bytes, free_bytes, available_bytes;
- 74     uint64_t buffers_bytes, cached_bytes;
- 75     uint64_t swap_total_bytes, swap_free_bytes;
- 76     uint64_t active_bytes, inactive_bytes;
- 77     uint64_t slab_reclaimable_bytes, slab_unreclaimable_bytes;
- 78     uint64_t dirty_bytes, writeback_bytes, shmem_bytes;
- 79 };
- 80 
- 81 struct procfast_net_dev_stats {
- 82     uint64_t rx_bytes, tx_bytes, rx_packets, tx_packets;
- 83     uint64_t rx_errors, tx_errors, rx_dropped, tx_dropped;
- 84     char name[16];
- 85 };
- 86 
- 87 struct procfast_net_data {
- 88     uint64_t seq;
- 89     uint64_t timestamp_ns;
- 90     uint32_t nr_devs;
- 91     uint32_t _pad;
- 92     struct procfast_net_dev_stats devs[PROCFAST_MAX_NET_DEVS];
- 93 };
- 94 
- 95 struct procfast_proc_stats {
- 96     uint32_t pid, tgid, ppid;
- 97     uint8_t  state;
- 98     uint8_t  _pad1[3];
- 99     uint32_t uid, nr_threads;
-100     char     comm[16];
-101     uint64_t utime_ns, stime_ns, cutime_ns, cstime_ns;
-102     int32_t  nice;
-103     uint32_t policy, last_cpu, rt_priority;
-104     uint64_t last_seen_ns, vol_ctxsw, invol_ctxsw;
-105     uint64_t rss_bytes, vsize_bytes, shared_bytes;
-106     uint64_t read_bytes, write_bytes;
-107     uint64_t cpu_runtime_ns;
-108     uint64_t start_time_ns;
-109 };
-110 
-111 struct procfast_proc_header {
-112     uint64_t seq;
-113     uint64_t timestamp_ns;
-114     uint32_t nr_procs;
-115     uint32_t _pad;
-116 };
-117 
-118 struct procfast_sock_info {
-119     uint64_t inode;
-120     uint32_t family;      /* AF_INET=2, AF_INET6=10, AF_UNIX=1 */
-121     uint32_t sock_type;   /* SOCK_STREAM=1, SOCK_DGRAM=2 */
-122     uint8_t  protocol;    /* IPPROTO_TCP=6, IPPROTO_UDP=17 */
-123     uint8_t  state;       /* TCP_ESTABLISHED=1, TCP_LISTEN=10, etc. */
-124     uint16_t _pad;
-125     uint32_t uid;
-126     uint32_t local_port;
-127     uint32_t remote_port;
-128     uint32_t local_addr4;
-129     uint32_t remote_addr4;
-130     uint8_t  local_addr6[16];
-131     uint8_t  remote_addr6[16];
-132 };
-133 
-134 struct procfast_fd_info {
-135     uint32_t pid;
-136     uint32_t fd;
-137     uint64_t open_time_ns;
-138     uint64_t inode;
-139     uint32_t flags;
-140     uint32_t _pad;
-141     char path[PROCFAST_MAX_FD_PATH];
-142 };
-143 
-144 /* ---- Handle ---- */
-145 
-146 struct procfast_mmap {
-147     void   *addr;
-148     size_t  len;
-149     int     fd;
-150 };
-151 
-152 struct procfast_handle {
-153     struct procfast_mmap cpu;
-154     struct procfast_mmap mem;
-155     struct procfast_mmap net;
-156     struct procfast_mmap proc_header;
-157     int proc_stats_fd;
-158     int fd_entries_fd;
-159     int sock_entries_fd;
-160     int available;  /* bitmask: 1=cpu, 2=mem, 4=net, 8=proc, 16=fd, 32=sock */
-161 };
-162 
-163 #define PROCFAST_HAS_CPU  1
-164 #define PROCFAST_HAS_MEM  2
-165 #define PROCFAST_HAS_NET  4
-166 #define PROCFAST_HAS_PROC 8
-167 #define PROCFAST_HAS_FD   16
-168 #define PROCFAST_HAS_SOCK 32
-169 
-170 /* ---- Internal helpers ---- */
-171 
-172 static inline int procfast__bpf_obj_get(const char *path) {
-173     union bpf_attr attr;
-174     memset(&attr, 0, sizeof(attr));
-175     attr.pathname = (uint64_t)(unsigned long)path;
-176     return (int)syscall(SYS_bpf, BPF_OBJ_GET, &attr, sizeof(attr));
-177 }
-178 
-179 static inline int procfast__open_map(const char *dir, const char *name,
-180                                   struct procfast_mmap *mm, size_t value_size) {
-181     char path[256];
-182     snprintf(path, sizeof(path), "%s/%s", dir, name);
-183 
-184     int fd = procfast__bpf_obj_get(path);
-185     if (fd < 0) return -1;
-186 
-187     void *addr = mmap(NULL, value_size, PROT_READ, MAP_SHARED, fd, 0);
-188     if (addr == MAP_FAILED) {
-189         close(fd);
-190         return -1;
-191     }
-192 
-193     mm->addr = addr;
-194     mm->len = value_size;
-195     mm->fd = fd;
-196     return 0;
-197 }
-198 
-199 static inline void procfast__close_map(struct procfast_mmap *mm) {
-200     if (mm->addr && mm->addr != MAP_FAILED) {
-201         munmap(mm->addr, mm->len);
-202         mm->addr = NULL;
-203     }
-204     if (mm->fd >= 0) {
-205         close(mm->fd);
-206         mm->fd = -1;
-207     }
-208 }
-209 
-210 /* Seqlock read: copy data while sequence counter is stable */
-211 static inline void procfast__seqlock_read(const void *src, void *dst, size_t len) {
-212     const volatile uint64_t *seq = (const volatile uint64_t *)src;
-213     for (;;) {
-214         uint64_t s1 = *seq;
-215         if (s1 & 1) { /* writer active */
-216             __asm__ __volatile__("pause" ::: "memory");
-217             continue;
-218         }
-219         __atomic_thread_fence(__ATOMIC_ACQUIRE);
-220         memcpy(dst, (const void *)src, len);
-221         __atomic_thread_fence(__ATOMIC_ACQUIRE);
-222         uint64_t s2 = *seq;
-223         if (s1 == s2) return;
-224     }
-225 }
-226 
-227 /* ---- Public API ---- */
-228 
-229 /**
-230  * Open a connection to procfast's pinned maps.
-231  * Returns NULL if procfast daemon is not running.
-232  */
-233 static inline struct procfast_handle *procfast_open(const char *pin_dir) {
-234     if (!pin_dir) pin_dir = "/sys/fs/bpf/procfast";
-235 
-236     struct stat st;
-237     if (stat(pin_dir, &st) != 0) return NULL;
-238 
-239     struct procfast_handle *h = (struct procfast_handle *)calloc(1, sizeof(*h));
-240     if (!h) return NULL;
-241 
-242     h->proc_stats_fd = -1;
-243     h->fd_entries_fd = -1;
-244     h->sock_entries_fd = -1;
-245     h->available = 0;
-246 
-247     if (procfast__open_map(pin_dir, "cpu_data", &h->cpu,
-248                        sizeof(struct procfast_cpu_data)) == 0)
-249         h->available |= PROCFAST_HAS_CPU;
-250 
-251     if (procfast__open_map(pin_dir, "mem_data", &h->mem,
-252                        sizeof(struct procfast_mem_data)) == 0)
-253         h->available |= PROCFAST_HAS_MEM;
-254 
-255     if (procfast__open_map(pin_dir, "net_data", &h->net,
-256                        sizeof(struct procfast_net_data)) == 0)
-257         h->available |= PROCFAST_HAS_NET;
-258 
-259     if (procfast__open_map(pin_dir, "proc_header", &h->proc_header,
-260                        sizeof(struct procfast_proc_header)) == 0) {
-261         char path[256];
-262         snprintf(path, sizeof(path), "%s/proc_stats", pin_dir);
-263         h->proc_stats_fd = procfast__bpf_obj_get(path);
-264         if (h->proc_stats_fd >= 0)
-265             h->available |= PROCFAST_HAS_PROC;
-266     }
-267 
-268     {
-269         char path[256];
-270         snprintf(path, sizeof(path), "%s/fd_entries", pin_dir);
-271         h->fd_entries_fd = procfast__bpf_obj_get(path);
-272         if (h->fd_entries_fd >= 0)
-273             h->available |= PROCFAST_HAS_FD;
-274     }
-275 
-276     {
-277         char path[256];
-278         snprintf(path, sizeof(path), "%s/sock_entries", pin_dir);
-279         h->sock_entries_fd = procfast__bpf_obj_get(path);
-280         if (h->sock_entries_fd >= 0)
-281             h->available |= PROCFAST_HAS_SOCK;
-282     }
-283 
-284     if (h->available == 0) {
-285         free(h);
-286         return NULL;
-287     }
-288 
-289     return h;
-290 }
-291 
-292 /** Close handle and free resources. */
-293 static inline void procfast_close(struct procfast_handle *h) {
-294     if (!h) return;
-295     procfast__close_map(&h->cpu);
-296     procfast__close_map(&h->mem);
-297     procfast__close_map(&h->net);
-298     procfast__close_map(&h->proc_header);
-299     if (h->proc_stats_fd >= 0) close(h->proc_stats_fd);
-300     if (h->fd_entries_fd >= 0) close(h->fd_entries_fd);
-301     if (h->sock_entries_fd >= 0) close(h->sock_entries_fd);
-302     free(h);
-303 }
-304 
-305 /** Check if a specific data source is available. */
-306 static inline int procfast_has(struct procfast_handle *h, int flag) {
-307     return h && (h->available & flag);
-308 }
-309 
-310 /** Read CPU stats (zero-copy via seqlock). Returns 0 on success. */
-311 static inline int procfast_read_cpu(struct procfast_handle *h, struct procfast_cpu_data *out) {
-312     if (!procfast_has(h, PROCFAST_HAS_CPU)) return -1;
-313     procfast__seqlock_read(h->cpu.addr, out, sizeof(*out));
-314     return 0;
-315 }
-316 
-317 /** Read memory stats. Returns 0 on success. */
-318 static inline int procfast_read_mem(struct procfast_handle *h, struct procfast_mem_data *out) {
-319     if (!procfast_has(h, PROCFAST_HAS_MEM)) return -1;
-320     procfast__seqlock_read(h->mem.addr, out, sizeof(*out));
-321     return 0;
-322 }
-323 
-324 /** Read network stats. Returns 0 on success. */
-325 static inline int procfast_read_net(struct procfast_handle *h, struct procfast_net_data *out) {
-326     if (!procfast_has(h, PROCFAST_HAS_NET)) return -1;
-327     procfast__seqlock_read(h->net.addr, out, sizeof(*out));
-328     return 0;
-329 }
-330 
-331 /**
-332  * Read all tracked processes via batch lookup.
-333  * Allocates *out_procs (caller must free). Returns count, or -1 on error.
-334  */
-335 static inline int procfast_read_procs(struct procfast_handle *h,
-336                                    struct procfast_proc_stats **out_procs) {
-337     if (!procfast_has(h, PROCFAST_HAS_PROC)) return -1;
-338 
-339     struct procfast_proc_header hdr;
-340     procfast__seqlock_read(h->proc_header.addr, &hdr, sizeof(hdr));
-341 
-342     size_t capacity = hdr.nr_procs > 0 ? hdr.nr_procs + 64 : 1024;
-343     struct procfast_proc_stats *procs = (struct procfast_proc_stats *)
-344         malloc(capacity * sizeof(struct procfast_proc_stats));
-345     if (!procs) return -1;
-346 
-347     int fd = h->proc_stats_fd;
-348     uint32_t key_size = sizeof(uint32_t);
-349     uint32_t val_size = sizeof(struct procfast_proc_stats);
-350     uint32_t batch = 512;
-351 
-352     uint32_t *keys = (uint32_t *)malloc(batch * key_size);
-353     struct procfast_proc_stats *vals = (struct procfast_proc_stats *)
-354         malloc(batch * val_size);
-355     if (!keys || !vals) {
-356         free(keys); free(vals); free(procs);
-357         return -1;
-358     }
-359 
-360     int total = 0;
-361     uint64_t in_batch = 0, out_batch = 0;
-362     int first = 1;
-363 
-364     struct { uint64_t sz, elem_flags, flags; } opts = {
-365         .sz = sizeof(opts), .elem_flags = 0, .flags = 0
-366     };
-367 
-368     for (;;) {
-369         uint32_t count = batch;
-370 
-371         union bpf_attr attr;
-372         memset(&attr, 0, sizeof(attr));
-373         attr.batch.map_fd = fd;
-374         attr.batch.in_batch = first ? 0 : (uint64_t)(unsigned long)&in_batch;
-375         attr.batch.out_batch = (uint64_t)(unsigned long)&out_batch;
-376         attr.batch.keys = (uint64_t)(unsigned long)keys;
-377         attr.batch.values = (uint64_t)(unsigned long)vals;
-378         attr.batch.count = count;
-379 
-380         int ret = (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_BATCH,
-381                                &attr, sizeof(attr));
-382         count = attr.batch.count;
-383         first = 0;
-384 
-385         for (uint32_t i = 0; i < count; i++) {
-386             if ((size_t)total >= capacity) {
-387                 capacity *= 2;
-388                 procs = (struct procfast_proc_stats *)
-389                     realloc(procs, capacity * sizeof(*procs));
-390                 if (!procs) { free(keys); free(vals); return -1; }
-391             }
-392             procs[total++] = vals[i];
-393         }
-394 
-395         in_batch = out_batch;
-396         if (ret != 0) break; /* ENOENT = done */
-397     }
-398 
-399     free(keys);
-400     free(vals);
-401     *out_procs = procs;
-402     return total;
-403 }
-404 
-405 /**
-406  * Look up a single process by PID. Returns 0 on success, -1 if not found.
-407  */
-408 static inline int procfast_read_proc(struct procfast_handle *h, uint32_t pid,
-409                                   struct procfast_proc_stats *out) {
-410     if (!procfast_has(h, PROCFAST_HAS_PROC)) return -1;
-411 
-412     union bpf_attr attr;
-413     memset(&attr, 0, sizeof(attr));
-414     attr.map_fd = h->proc_stats_fd;
-415     attr.key = (uint64_t)(unsigned long)&pid;
-416     attr.value = (uint64_t)(unsigned long)out;
-417 
-418     return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
-419 }
-420 
-421 /**
-422  * Read all tracked file descriptors via batch lookup.
-423  * Allocates *out_fds (caller must free). Returns count, or -1 on error.
-424  */
-425 static inline int procfast_read_fds(struct procfast_handle *h,
-426                                  struct procfast_fd_info **out_fds) {
-427     if (!procfast_has(h, PROCFAST_HAS_FD)) return -1;
-428 
-429     size_t capacity = 4096;
-430     struct procfast_fd_info *fds = (struct procfast_fd_info *)
-431         malloc(capacity * sizeof(struct procfast_fd_info));
-432     if (!fds) return -1;
-433 
-434     int fd = h->fd_entries_fd;
-435     uint32_t batch = 512;
-436 
-437     uint64_t *keys = (uint64_t *)malloc(batch * sizeof(uint64_t));
-438     struct procfast_fd_info *vals = (struct procfast_fd_info *)
-439         malloc(batch * sizeof(struct procfast_fd_info));
-440     if (!keys || !vals) {
-441         free(keys); free(vals); free(fds);
-442         return -1;
-443     }
-444 
-445     int total = 0;
-446     uint64_t in_batch = 0, out_batch = 0;
-447     int first = 1;
-448 
-449     for (;;) {
-450         uint32_t count = batch;
-451 
-452         union bpf_attr attr;
-453         memset(&attr, 0, sizeof(attr));
-454         attr.batch.map_fd = fd;
-455         attr.batch.in_batch = first ? 0 : (uint64_t)(unsigned long)&in_batch;
-456         attr.batch.out_batch = (uint64_t)(unsigned long)&out_batch;
-457         attr.batch.keys = (uint64_t)(unsigned long)keys;
-458         attr.batch.values = (uint64_t)(unsigned long)vals;
-459         attr.batch.count = count;
-460 
-461         int ret = (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_BATCH,
-462                                &attr, sizeof(attr));
-463         count = attr.batch.count;
-464         first = 0;
-465 
-466         for (uint32_t i = 0; i < count; i++) {
-467             if ((size_t)total >= capacity) {
-468                 capacity *= 2;
-469                 fds = (struct procfast_fd_info *)
-470                     realloc(fds, capacity * sizeof(*fds));
-471                 if (!fds) { free(keys); free(vals); return -1; }
-472             }
-473             fds[total++] = vals[i];
-474         }
-475 
-476         in_batch = out_batch;
-477         if (ret != 0) break; /* ENOENT = done */
-478     }
-479 
-480     free(keys);
-481     free(vals);
-482     *out_fds = fds;
-483     return total;
-484 }
-485 
-486 /**
-487  * Look up a single file descriptor by PID + fd number.
-488  * Returns 0 on success, -1 if not found.
-489  */
-490 static inline int procfast_read_fd(struct procfast_handle *h, uint32_t pid,
-491                                 uint32_t fd_num, struct procfast_fd_info *out) {
-492     if (!procfast_has(h, PROCFAST_HAS_FD)) return -1;
-493 
-494     uint64_t key = ((uint64_t)pid << 32) | fd_num;
-495 
-496     union bpf_attr attr;
-497     memset(&attr, 0, sizeof(attr));
-498     attr.map_fd = h->fd_entries_fd;
-499     attr.key = (uint64_t)(unsigned long)&key;
-500     attr.value = (uint64_t)(unsigned long)out;
-501 
-502     return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
-503 }
-504 
-505 /**
-506  * Look up socket info by inode number.
-507  * Returns 0 on success, -1 if not found.
-508  */
-509 static inline int procfast_read_sock(struct procfast_handle *h, uint64_t inode,
-510                                       struct procfast_sock_info *out) {
-511     if (!procfast_has(h, PROCFAST_HAS_SOCK)) return -1;
-512 
-513     union bpf_attr attr;
-514     memset(&attr, 0, sizeof(attr));
-515     attr.map_fd = h->sock_entries_fd;
-516     attr.key = (uint64_t)(unsigned long)&inode;
-517     attr.value = (uint64_t)(unsigned long)out;
-518 
-519     return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
-520 }
-521 
-522 #ifdef __cplusplus
-523 }
-524 #endif
-525 
-526 #endif /* PROCFAST_CLIENT_H */
-
-library/include/procfast_data.h --- C++
- 1 /*
- 2  * procfast_data.h - procfast integration for libproc2
- 3  *
- 4  * Provides a global procfast handle and init/close/available functions
- 5  * so that stat.c, meminfo.c, and readproc.c can read from BPF maps
- 6  * instead of /proc when --procfast is enabled.
- 7  *
- 8  * SPDX-License-Identifier: LGPL-2.1-or-later
- 9  */
-10 
-11 #ifndef PROCPS_PROCFAST_DATA_H
-12 #define PROCPS_PROCFAST_DATA_H
-13 
-14 #include "procfast_client.h"
-15 
-16 extern struct procfast_handle *procfast_handle;
-17 
-18 /* Try to connect to the procfast daemon. Returns 1 on success, 0 on failure. */
-19 int procfast_data_init(void);
-20 
-21 /* Close the procfast connection and free resources. */
-22 void procfast_data_close(void);
-23 
-24 /* Returns 1 if procfast_handle is valid and usable. */
-25 int procfast_data_available(void);
-26 
-27 #endif /* PROCPS_PROCFAST_DATA_H */
-
-library/libproc2.sym --- Text
-76 76         procps_sigmask_names;
-77 77         procps_capmask_names;
-78 78 } LIBPROC_2.1;
-   79 
-   80 LIBPROC_2.3 {
-   81         procfast_handle;
-   82         procfast_data_init;
-   83         procfast_data_close;
-   84         procfast_data_available;
-   85 } LIBPROC_2.2;
-
-library/meminfo.c --- 1/2 --- Text (12 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-33 33 
-34 34 #include "procps-private.h"
-35 35 #include "meminfo.h"
-.. 36 #include "procfast_data.h"
-36 37 
-37 38 
-38 39 #define MEMINFO_FILE  "/proc/meminfo"
-
-library/meminfo.c --- 2/2 --- Text (12 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-672     // clear out the soon to be 'cu 673     // clear out the soon to be 'cu
-... rrent' values                       ... rrent' values
-673     memset(&info->hist.new, 0, size 674     memset(&info->hist.new, 0, size
-... of(struct meminfo_data));           ... of(struct meminfo_data));
-674                                     675 
-...                                     676 
-...                                     677     /* procfast: read memory data f
-...                                     ... rom BPF maps instead of /proc/memin
-...                                     ... fo */
-...                                     678     if (procfast_data_available()) 
-...                                     ... {
-...                                     679         struct procfast_mem_data pr
-...                                     ... ocfast_mem;
-...                                     680         if (procfast_read_mem(procf
-...                                     ... ast_handle, &procfast_mem) == 0) {
-...                                     681             /* procfast reports byt
-...                                     ... es; meminfo_data uses kB */
-...                                     682             mHr(MemTotal)      = pr
-...                                     ... ocfast_mem.total_bytes / 1024;
-...                                     683             mHr(MemFree)       = pr
-...                                     ... ocfast_mem.free_bytes / 1024;
-...                                     684             mHr(MemAvailable)  = pr
-...                                     ... ocfast_mem.available_bytes / 1024;
-...                                     685             mHr(Buffers)       = pr
-...                                     ... ocfast_mem.buffers_bytes / 1024;
-...                                     686             mHr(Cached)        = pr
-...                                     ... ocfast_mem.cached_bytes / 1024;
-...                                     687             mHr(SwapTotal)     = pr
-...                                     ... ocfast_mem.swap_total_bytes / 1024;
-...                                     688             mHr(SwapFree)      = pr
-...                                     ... ocfast_mem.swap_free_bytes / 1024;
-...                                     689             mHr(Active)        = pr
-...                                     ... ocfast_mem.active_bytes / 1024;
-...                                     690             mHr(Inactive)      = pr
-...                                     ... ocfast_mem.inactive_bytes / 1024;
-...                                     691             mHr(SReclaimable)  = pr
-...                                     ... ocfast_mem.slab_reclaimable_bytes /
-...                                     ...  1024;
-...                                     692             mHr(SUnreclaim)    = pr
-...                                     ... ocfast_mem.slab_unreclaimable_bytes
-...                                     ...  / 1024;
-...                                     693             mHr(Slab)          = mH
-...                                     ... r(SReclaimable) + mHr(SUnreclaim);
-...                                     694             mHr(Dirty)         = pr
-...                                     ... ocfast_mem.dirty_bytes / 1024;
-...                                     695             mHr(Writeback)     = pr
-...                                     ... ocfast_mem.writeback_bytes / 1024;
-...                                     696             mHr(Shmem)         = pr
-...                                     ... ocfast_mem.shmem_bytes / 1024;
-...                                     697 
-...                                     698             if (0 == mHr(MemAvailab
-...                                     ... le))
-...                                     699                 mHr(MemAvailable) =
-...                                     ...  mHr(MemFree);
-...                                     700             mHr(derived_mem_cached)
-...                                     ...  = mHr(Cached) + mHr(SReclaimable);
-...                                     701 
-...                                     702             if (mHr(MemAvailable) >
-...                                     ...  mHr(MemTotal))
-...                                     703                 mHr(MemAvailable) =
-...                                     ...  mHr(MemFree);
-...                                     704             {
-...                                     705                 signed long mem_use
-...                                     ... d = mHr(MemTotal) - mHr(MemAvailabl
-...                                     ... e);
-...                                     706                 if (mem_used < 0)
-...                                     707                     mem_used = mHr(
-...                                     ... MemTotal) - mHr(MemFree);
-...                                     708                 mHr(derived_mem_use
-...                                     ... d) = (unsigned long)mem_used;
-...                                     709             }
-...                                     710 
-...                                     711             if (mHr(SwapFree) < mHr
-...                                     ... (SwapTotal))
-...                                     712                 mHr(derived_swap_us
-...                                     ... ed) = mHr(SwapTotal) - mHr(SwapFree
-...                                     ... );
-...                                     713 
-...                                     714             return 0;
-...                                     715         }
-...                                     716     }
-...                                     717 
-675     if (-1 == info->meminfo_fd      718     if (-1 == info->meminfo_fd
-676     && (-1 == (info->meminfo_fd = o 719     && (-1 == (info->meminfo_fd = o
-... pen(MEMINFO_FILE, O_RDONLY))))      ... pen(MEMINFO_FILE, O_RDONLY))))
-677         return 1;                   720         return 1;
-678     else {                          721     else {
-
-library/pids.c --- 1/5 --- Text (12 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-35 35 #include <sys/types.h>
-36 36 
-37 37 #include "devname.h"
-.. 38 #include "procfast_data.h"
-38 39 #include "numa.h"
-.. 40 #include "pwcache.h"
-39 41 #include "readproc.h"
-40 42 #include "wchan.h"
-41 43 
-
-library/pids.c --- 2/5 --- Text (12 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-1242                                    1244 
-1243     // iterate stuff ------------- 1245     // iterate stuff -------------
-.... -------------------------          .... -------------------------
-1244     n_inuse = 0;                   1246     n_inuse = 0;
-....                                    1247 
-....                                    1248     /* procfast fast path: read al
-....                                    .... l processes from BPF maps in one b
-....                                    .... atch call,
-....                                    1249        completely bypassing the /p
-....                                    .... roc directory walk and all per-PID
-....                                    ....  reads */
-....                                    1250     if (procfast_data_available())
-....                                    ....  {
-....                                    1251         extern char *str_none;
-....                                    1252         struct procfast_proc_stats
-....                                    ....  *kprocs = NULL;
-....                                    1253         int nkprocs = procfast_rea
-....                                    .... d_procs(procfast_handle, &kprocs);
-....                                    1254         long hz = sysconf(_SC_CLK_
-....                                    .... TCK);
-....                                    1255         if (hz <= 0) hz = 100;
-....                                    1256         double ns_to_jif = (double
-....                                    .... )hz / 1e9;
-....                                    1257 
-....                                    1258         for (int ki = 0; ki < nkpr
-....                                    .... ocs; ki++) {
-....                                    1259             struct procfast_proc_s
-....                                    .... tats *kp = &kprocs[ki];
-....                                    1260             if (kp->pid <= 0 || kp
-....                                    .... ->state >= 4) continue;
-....                                    1261 
-....                                    1262             if (!(n_inuse < n_allo
-....                                    .... c)) {
-....                                    1263                 n_alloc += STACKS_
-....                                    .... GROW;
-....                                    1264                 if (!(info->fetch.
-....                                    .... anchor = realloc(info->fetch.ancho
-....                                    .... r, sizeof(void *) * n_alloc))
-....                                    1265                 || (!(ext = pids_s
-....                                    .... tacks_alloc(info, STACKS_GROW))))
-....                                    1266                     { free(kprocs)
-....                                    .... ; return -1; }
-....                                    1267                 memcpy(info->fetch
-....                                    .... .anchor + n_inuse, ext->stacks, si
-....                                    .... zeof(void *) * STACKS_GROW);
-....                                    1268             }
-....                                    1269 
-....                                    1270             proc_t *p = &info->fet
-....                                    .... ch_proc;
-....                                    1271             memset(p, 0, sizeof(*p
-....                                    .... ));
-....                                    1272 
-....                                    1273             /* Set string fields t
-....                                    .... o str_none to prevent NULL derefer
-....                                    .... ence */
-....                                    1274             p->euser = p->ruser = 
-....                                    .... p->suser = p->fuser
-....                                    1275                 = p->egroup = p->r
-....                                    .... group = p->sgroup = p->fgroup
-....                                    1276                 = p->supgid = p->s
-....                                    .... upgrp = str_none;
-....                                    1277 
-....                                    1278             p->tid = p->tgid = (in
-....                                    .... t)kp->pid;
-....                                    1279             p->ppid = (int)kp->ppi
-....                                    .... d;
-....                                    1280             p->euid = p->ruid = p-
-....                                    .... >suid = (uid_t)kp->uid;
-....                                    1281             p->nlwp = kp->nr_threa
-....                                    .... ds > 0 ? (int)kp->nr_threads : 1;
-....                                    1282             p->nice = kp->nice;
-....                                    1283             p->rtprio = (int)kp->r
-....                                    .... t_priority;
-....                                    1284             if (kp->policy == 1 ||
-....                                    ....  kp->policy == 2) {
-....                                    1285                 /* SCHED_FIFO=1, S
-....                                    .... CHED_RR=2: RT priority */
-....                                    1286                 p->priority = -1 -
-....                                    ....  (int)kp->rt_priority;
-....                                    1287             } else {
-....                                    1288                 /* SCHED_NORMAL/OT
-....                                    .... HER: nice + 20 */
-....                                    1289                 p->priority = kp->
-....                                    .... nice + 20;
-....                                    1290             }
-....                                    1291             p->sched = (int)kp->po
-....                                    .... licy;
-....                                    1292             p->processor = (int)kp
-....                                    .... ->last_cpu;
-....                                    1293             p->utime = (unsigned l
-....                                    .... ong long)(kp->cpu_runtime_ns * ns_
-....                                    .... to_jif);
-....                                    1294             p->stime = 0;
-....                                    1295             p->cutime = (unsigned 
-....                                    .... long long)(kp->cutime_ns * ns_to_j
-....                                    .... if);
-....                                    1296             p->cstime = (unsigned 
-....                                    .... long long)(kp->cstime_ns * ns_to_j
-....                                    .... if);
-....                                    1297             p->start_time = (unsig
-....                                    .... ned long long)(kp->start_time_ns *
-....                                    ....  ns_to_jif);
-....                                    1298             /* Memory fields — top
-....                                    ....  uses multiple representations:
-....                                    1299                resident/share/size
-....                                    ....  = pages (for MEM_RES_PGS, CVT via
-....                                    ....  pgs2k_shift)
-....                                    1300                vm_rss/vm_size = Ki
-....                                    .... B (for VM_RSS, VM_SIZE)
-....                                    1301                rss = pages (for in
-....                                    .... ternal use) */
-....                                    1302             p->resident = kp->rss_
-....                                    .... bytes / 4096;
-....                                    1303             p->share = kp->shared_
-....                                    .... bytes / 4096;
-....                                    1304             p->size = kp->vsize_by
-....                                    .... tes / 4096;
-....                                    1305             p->vm_rss = kp->rss_by
-....                                    .... tes / 1024;
-....                                    1306             p->vm_size = kp->vsize
-....                                    .... _bytes / 1024;
-....                                    1307             p->vm_rss_shared = kp-
-....                                    .... >shared_bytes / 1024;
-....                                    1308             p->rss = kp->rss_bytes
-....                                    ....  / 4096;
-....                                    1309             p->vsize = kp->vsize_b
-....                                    .... ytes;
-....                                    1310             p->read_bytes = kp->re
-....                                    .... ad_bytes;
-....                                    1311             p->write_bytes = kp->w
-....                                    .... rite_bytes;
-....                                    1312             switch (kp->state) {
-....                                    1313                 case 0: p->state =
-....                                    ....  'R'; break;
-....                                    1314                 case 1: p->state =
-....                                    ....  'S'; break;
-....                                    1315                 case 2: p->state =
-....                                    ....  'D'; break;
-....                                    1316                 case 3: p->state =
-....                                    ....  'T'; break;
-....                                    1317                 default: p->state 
-....                                    .... = '?'; break;
-....                                    1318             }
-....                                    1319             p->cmd = kp->comm[0] ?
-....                                    ....  strndup(kp->comm, 15) : strdup("?
-....                                    .... ");
-....                                    1320             p->cmdline = strdup(p-
-....                                    .... >cmd);
-....                                    1321             p->euser = pwcache_get
-....                                    .... _user(p->euid);
-....                                    1322             p->egroup = pwcache_ge
-....                                    .... t_group(p->egid);
-....                                    1323 
-....                                    1324             if (!pids_proc_tally(i
-....                                    .... nfo, &info->fetch.counts, p))
-....                                    1325                 { free(kprocs); re
-....                                    .... turn -1; }
-....                                    1326             if (!pids_assign_resul
-....                                    .... ts(info, info->fetch.anchor[n_inus
-....                                    .... e++], p))
-....                                    1327                 { free(kprocs); re
-....                                    .... turn -1; }
-....                                    1328         }
-....                                    1329         free(kprocs);
-....                                    1330         goto procfast_done;
-....                                    1331     }
-....                                    1332 
-1245     while (info->read_something(in 1333     while (info->read_something(in
-.... fo->fetch_PT, &info->fetch_proc))  .... fo->fetch_PT, &info->fetch_proc)) 
-.... {                                  .... {
-1246         if (!(n_inuse < n_alloc))  1334         if (!(n_inuse < n_alloc)) 
-.... {                                  .... {
-1247             n_alloc += STACKS_GROW 1335             n_alloc += STACKS_GROW
-.... ;                                  .... ;
-1248             if (!(info->fetch.anch 1336             if (!(info->fetch.anch
-     or = realloc(info->fetch.anchor, s      or = realloc(info->fetch.anchor, s
-     izeof(void *) * n_alloc))               izeof(void *) * n_alloc))
-
-library/pids.c --- 3/5 --- Text (12 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-1261 1349     if (errno == ENOMEM)
-1262 1350         return -1;
-1263 1351 
-.... 1352 procfast_done:
-1264 1353     // finalize stuff -------------------------------------
-1265 1354     /* note: we go to this trouble of maintaining a duplicate of the consolidated |
-1266 1355              extent stacks addresses represented as our 'anchor' since these ptrs |
-
-library/pids.c --- 4/5 --- Text (12 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-1562     if (info->containers_yes)      1651     if (info->containers_yes)
-1563         pids_containers_check();   1652         pids_containers_check();
-1564                                    1653 
-1565     if (!pids_oldproc_open(&info-> 1654     if (!procfast_data_available()
-.... fetch_PT, info->oldflags))         .... ) {
-....                                    1655         if (!pids_oldproc_open(&in
-....                                    .... fo->fetch_PT, info->oldflags))
-1566         return NULL;               1656             return NULL;
-....                                    1657     }
-1567     info->read_something = which ? 1658     info->read_something = which ?
-....  readeither : readproc;            ....  readeither : readproc;
-1568                                    1659 
-1569     info->boot_tics = 0;           1660     info->boot_tics = 0;
-
-library/pids.c --- 5/5 --- Text (12 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-1572                                    1663 
-1573     rc = pids_stacks_fetch(info);  1664     rc = pids_stacks_fetch(info);
-1574                                    1665 
-1575     pids_oldproc_close(&info->fetc 1666     if (!procfast_data_available()
-.... h_PT);                             .... )
-....                                    1667         pids_oldproc_close(&info->
-....                                    .... fetch_PT);
-1576     // we better have found at lea 1668     // we better have found at lea
-.... st 1 pid                           .... st 1 pid
-1577     return (rc > 0) ? &info->fetch 1669     return (rc > 0) ? &info->fetch
-.... .results : NULL;                   .... .results : NULL;
-1578 } // end: procps_pids_reap         1670 } // end: procps_pids_reap
-
-library/procfast_data.c --- C
- 1 /*
- 2  * procfast_data.c - procfast integration for libproc2
- 3  *
- 4  * Global handle and init/close/available functions for procfast.
- 5  *
- 6  * SPDX-License-Identifier: LGPL-2.1-or-later
- 7  */
- 8 
- 9 #include "procfast_data.h"
-10 
-11 #include <stdio.h>
-12 
-13 struct procfast_handle *procfast_handle = NULL;
-14 
-15 int procfast_data_init(void) {
-16     procfast_handle = procfast_open(NULL);  /* uses default /sys/fs/bpf/procfast */
-17     return procfast_handle != NULL ? 1 : 0;
-18 }
-19 
-20 void procfast_data_close(void) {
-21     if (procfast_handle) {
-22         procfast_close(procfast_handle);
-23         procfast_handle = NULL;
-24     }
-25 }
-26 
-27 int procfast_data_available(void) {
-28     return procfast_handle != NULL ? 1 : 0;
-29 }
-
-library/readproc.c --- 1/2 --- Text (8 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-50 50 #include "misc.h"
-51 51 #include "pwcache.h"
-52 52 #include "readproc.h"
-.. 53 #include "procfast_data.h"
-53 54 
-54 55 // sometimes it's easier to do this manually, w/o gcc helping
-55 56 #ifdef PROF
-
-library/readproc.c --- 2/2 --- Text (8 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-1248     p->euid = sb.st_uid;           1249     p->euid = sb.st_uid;          
-....               /* need a way to get ....               /* need a way to get
-....  real uid */                       ....  real uid */
-1249     p->egid = sb.st_gid;           1250     p->egid = sb.st_gid;          
-....               /* need a way to get ....               /* need a way to get
-....  real gid */                       ....  real gid */
-1250                                    1251 
-....                                    1252     /* procfast: try to fill basic
-....                                    ....  proc fields from BPF maps */
-....                                    1253     if (procfast_data_available())
-....                                    ....  {
-....                                    1254         struct procfast_proc_stats
-....                                    ....  kps;
-....                                    1255         if (procfast_read_proc(pro
-....                                    .... cfast_handle, (uint32_t)p->tid, &k
-....                                    .... ps) == 0) {
-....                                    1256             long hz = sysconf(_SC_
-....                                    .... CLK_TCK);
-....                                    1257             if (hz <= 0) hz = 100;
-....                                    1258             double ns_to_jif = (do
-....                                    .... uble)hz / 1e9;
-....                                    1259 
-....                                    1260             p->ppid  = (int)kps.pp
-....                                    .... id;
-....                                    1261             /* Use cpu_runtime_ns 
-....                                    .... for accurate CPU% (tick-based utim
-....                                    .... e/stime
-....                                    1262                update in batches c
-....                                    .... ausing wild CPU% swings). Put all 
-....                                    .... runtime
-....                                    1263                in utime so top's d
-....                                    .... elta calculation works correctly. 
-....                                    .... */
-....                                    1264             p->utime = (unsigned l
-....                                    .... ong long)(kps.cpu_runtime_ns * ns_
-....                                    .... to_jif);
-....                                    1265             p->stime = 0;
-....                                    1266             p->cutime = (unsigned 
-....                                    .... long long)(kps.cutime_ns * ns_to_j
-....                                    .... if);
-....                                    1267             p->cstime = (unsigned 
-....                                    .... long long)(kps.cstime_ns * ns_to_j
-....                                    .... if);
-....                                    1268             p->start_time = (unsig
-....                                    .... ned long long)(kps.start_time_ns *
-....                                    ....  ns_to_jif);
-....                                    1269             p->nlwp = (int)kps.nr_
-....                                    .... threads;
-....                                    1270             p->nice = kps.nice;
-....                                    1271             p->processor = (int)kp
-....                                    .... s.last_cpu;
-....                                    1272             p->vm_rss = kps.rss_by
-....                                    .... tes / 1024;
-....                                    1273             p->rss = kps.rss_bytes
-....                                    ....  / 4096;
-....                                    1274             p->vsize = kps.vsize_b
-....                                    .... ytes;
-....                                    1275             p->vm_size = kps.vsize
-....                                    .... _bytes / 1024;
-....                                    1276             p->euid = (uid_t)kps.u
-....                                    .... id;
-....                                    1277 
-....                                    1278             /* Map procfast state 
-....                                    .... to Linux /proc single-char state *
-....                                    .... /
-....                                    1279             switch (kps.state) {
-....                                    1280                 case 0: p->state =
-....                                    ....  'R'; break;
-....                                    1281                 case 1: p->state =
-....                                    ....  'S'; break;
-....                                    1282                 case 2: p->state =
-....                                    ....  'D'; break;
-....                                    1283                 case 3: p->state =
-....                                    ....  'T'; break;
-....                                    1284                 case 4: p->state =
-....                                    ....  'Z'; break;
-....                                    1285                 default: p->state 
-....                                    .... = '?'; break;
-....                                    1286             }
-....                                    1287 
-....                                    1288             if (p->cmd) free(p->cm
-....                                    .... d);
-....                                    1289             p->cmd = strdup(kps.co
-....                                    .... mm);
-....                                    1290 
-....                                    1291             /* I/O stats */
-....                                    1292             p->read_bytes  = kps.r
-....                                    .... ead_bytes;
-....                                    1293             p->write_bytes = kps.w
-....                                    .... rite_bytes;
-....                                    1294 
-....                                    1295             /* Resolve username fr
-....                                    .... om uid (cached, cheap) */
-....                                    1296             if (flags & PROC_FILLU
-....                                    .... SR)
-....                                    1297                 p->euser = pwcache
-....                                    .... _get_user(p->euid);
-....                                    1298             if (flags & PROC_FILLG
-....                                    .... RP)
-....                                    1299                 p->egroup = pwcach
-....                                    .... e_get_group(p->egid);
-....                                    1300 
-....                                    1301             /* Skip ALL /proc/[pid
-....                                    .... ]/* file reads — we have everythin
-....                                    .... g
-....                                    1302                from procfast. Only
-....                                    ....  cmdline is lost (we have comm ins
-....                                    .... tead). */
-....                                    1303             return p;
-....                                    1304         }
-....                                    1305     }
-....                                    1306 
-....                                    1307 
-1251     /* this attempted read of 'sta 1308     /* this attempted read of 'sta
-.... t' is now unconditional to ensure  .... t' is now unconditional to ensure 
-.... a 'cmd' name                       .... a 'cmd' name
-1252        as a minimum. this prevents 1309        as a minimum. this prevents
-....  a NULL 'cmdline' pointer for kern ....  a NULL 'cmdline' pointer for kern
-.... el threads                         .... el threads
-1253        in case the 'status' file i 1310        in case the 'status' file i
-.... s missing or not otherwise read .. .... s missing or not otherwise read ..
-.... . */                               .... . */
-1254     if (file2str(PT->pidfd, "stat" 1311     if (file2str(PT->pidfd, "stat"
-.... , &ub) == -1)                      .... , &ub) == -1)
-1255         goto next_proc;            1312         goto next_proc;
-1256     rc += stat2proc(ub.buf, p);    1313     rc += stat2proc(ub.buf, p);
-....                                    1314 procfast_skip_stat:
-1257                                    1315 
-1258     if (PT->hide_kernel && (p->ppi 1316     if (PT->hide_kernel && (p->ppi
-.... d == 2 || p->tid == 2)) {          .... d == 2 || p->tid == 2)) {
-1259         free_acquired(p);          1317         free_acquired(p);
-
-library/stat.c --- 1/2 --- Text (8 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-35 35 
-36 36 #include "procps-private.h"
-37 37 #include "stat.h"
-.. 38 #include "procfast_data.h"
-38 39 
-39 40 
-40 41 #define STAT_FILE "/proc/stat"
-
-library/stat.c --- 2/2 --- Text (8 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-767         info->cpus.hist.n_inuse = 0 768         info->cpus.hist.n_inuse = 0
-... ;                                   ... ;
-768     }                               769     }
-769                                     770 
-...                                     771 
-...                                     772     /* procfast: read CPU data from
-...                                     ...  BPF maps instead of /proc/stat */
-...                                     773     if (procfast_data_available()) 
-...                                     ... {
-...                                     774         struct procfast_cpu_data pr
-...                                     ... ocfast_cpu;
-...                                     775         if (procfast_read_cpu(procf
-...                                     ... ast_handle, &procfast_cpu) == 0) {
-...                                     776             long hz = sysconf(_SC_C
-...                                     ... LK_TCK);
-...                                     777             if (hz <= 0) hz = 100;
-...                                     778             double ns_to_jif = (dou
-...                                     ... ble)hz / 1e9;
-...                                     779 
-...                                     780             #define PROCFAST_FILL_J
-...                                     ... IFS(dst, src) do { \
-...                                     781                 (dst).user   = (uns
-...                                     ... igned long long)((src)->user_ns    
-...                                     ...  * ns_to_jif); \
-...                                     782                 (dst).nice   = (uns
-...                                     ... igned long long)((src)->nice_ns    
-...                                     ...  * ns_to_jif); \
-...                                     783                 (dst).system = (uns
-...                                     ... igned long long)((src)->system_ns  
-...                                     ...  * ns_to_jif); \
-...                                     784                 (dst).idle   = (uns
-...                                     ... igned long long)((src)->idle_ns    
-...                                     ...  * ns_to_jif); \
-...                                     785                 (dst).iowait = (uns
-...                                     ... igned long long)((src)->iowait_ns  
-...                                     ...  * ns_to_jif); \
-...                                     786                 (dst).irq    = (uns
-...                                     ... igned long long)((src)->irq_ns     
-...                                     ...  * ns_to_jif); \
-...                                     787                 (dst).sirq   = (uns
-...                                     ... igned long long)((src)->softirq_ns 
-...                                     ...  * ns_to_jif); \
-...                                     788                 (dst).stolen = (uns
-...                                     ... igned long long)((src)->steal_ns   
-...                                     ...  * ns_to_jif); \
-...                                     789                 (dst).guest  = (uns
-...                                     ... igned long long)((src)->guest_ns   
-...                                     ...  * ns_to_jif); \
-...                                     790                 (dst).gnice  = (uns
-...                                     ... igned long long)((src)->guest_nice_
-...                                     ... ns * ns_to_jif); \
-...                                     791             } while (0)
-...                                     792 
-...                                     793             sum_ptr = &info->cpu_hi
-...                                     ... st;
-...                                     794             memcpy(&sum_ptr->old, &
-...                                     ... sum_ptr->new, sizeof(struct stat_ji
-...                                     ... fs));
-...                                     795             sum_ptr->id = STAT_SUMM
-...                                     ... ARY_ID;
-...                                     796             sum_ptr->numa_node = ST
-...                                     ... AT_NODE_INVALID;
-...                                     797             PROCFAST_FILL_JIFS(sum_
-...                                     ... ptr->new, &procfast_cpu.total);
-...                                     798             stat_derive_unique(sum_
-...                                     ... ptr);
-...                                     799 
-...                                     800             i = 0;
-...                                     801             for (unsigned int c = 0
-...                                     ... ; c < procfast_cpu.nr_cpus; c++) {
-...                                     802                 if (i >= info->cpus
-...                                     ... .hist.n_alloc) {
-...                                     803                     info->cpus.hist
-...                                     ... .n_alloc += NEWOLD_INCR;
-...                                     804                     info->cpus.hist
-...                                     ... .tics = realloc(info->cpus.hist.tic
-...                                     ... s,
-...                                     805                         info->cpus.
-...                                     ... hist.n_alloc * sizeof(struct hist_t
-...                                     ... ic));
-...                                     806                     if (!info->cpus
-...                                     ... .hist.tics)
-...                                     807                         return 1;
-...                                     808                 }
-...                                     809                 cpu_ptr = info->cpu
-...                                     ... s.hist.tics + i;
-...                                     810                 memcpy(&cpu_ptr->ol
-...                                     ... d, &cpu_ptr->new, sizeof(struct sta
-...                                     ... t_jifs));
-...                                     811                 cpu_ptr->id = (int)
-...                                     ... c;
-...                                     812                 cpu_ptr->numa_node 
-...                                     ... = STAT_NODE_INVALID;
-...                                     813                 cpu_ptr->count = 1;
-...                                     814                 PROCFAST_FILL_JIFS(
-...                                     ... cpu_ptr->new, &procfast_cpu.per_cpu
-...                                     ... [c]);
-...                                     815                 stat_derive_unique(
-...                                     ... cpu_ptr);
-...                                     816                 i++;
-...                                     817             }
-...                                     818 
-...                                     819             #undef PROCFAST_FILL_JI
-...                                     ... FS
-...                                     820 
-...                                     821             info->cpus.total = info
-...                                     ... ->cpus.hist.n_inuse = sum_ptr->coun
-...                                     ... t = i;
-...                                     822             if (info->cpu_count_hwm
-...                                     ...  != info->cpus.total) {
-...                                     823                 info->cpu_count_hwm
-...                                     ...  = info->cpus.total;
-...                                     824                 stat_cores_reset(in
-...                                     ... fo);
-...                                     825                 if (!stat_cores_ver
-...                                     ... ify(info))
-...                                     826                     return 1;
-...                                     827                 stat_cores_link(inf
-...                                     ... o);
-...                                     828             }
-...                                     829             return 0;
-...                                     830         }
-...                                     831     }
-...                                     832 
-770     if (!info->stat_fp              833     if (!info->stat_fp
-771     && (!(info->stat_fp = fopen(STA 834     && (!(info->stat_fp = fopen(STA
-... T_FILE, "r"))))                     ... T_FILE, "r"))))
-772         return 1;                   835         return 1;
-773     else {                          836     else {
-
-src/top/top.c --- 1/3 --- Text (230 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-55 55 #include "misc.h"
-56 56 #include "pids.h"
-57 57 #include "stat.h"
-.. 58 #include "procfast_data.h"
-58 59 
-59 60 #include "top.h"
-60 61 #include "top_nls.h"
-
-src/top/top.c --- 2/3 --- Text (230 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-4406 4407        { "version",           no_argument,       NULL, 'V' },
-4407 4408        { "width",             optional_argument, NULL, 'w' },
-4408 4409        { "single-cpu-toggle", no_argument,       NULL, '1' },
-.... 4410        { "procfast",              no_argument,       NULL, 0x4b42 },
-4409 4411        { NULL, 0, NULL, 0 }
-4410 4412    };
-4411 4413    float tmp_delay = FLT_MAX;
-
-src/top/top.c --- 3/3 --- Text (230 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
-4541 4543                error_exit(fmtmk(N_fmt(BAD_widtharg_fmt), cp));
-4542 4544             Width_mode = (int)tmp;
-4543 4545             continue;
-.... 4546          case 0x4b42:   /* --procfast */
-.... 4547             if (!procfast_data_init())
-.... 4548                fprintf(stderr, "%s: --procfast: procfast daemon not available\n", Myname);
-.... 4549             break;
-4544 4550          default:
-4545 4551             /* we'll rely on getopt for any error message while
-4546 4552                forcing an EXIT_FAILURE with an empty string ... */
-
-src/top/top_nls.c --- C
-428 428       " -u, --filter-only-euser =USER   show only processes owned by USER\n"
-429 429       " -w, --width [=COLUMNS]          change print width [,use COLUMNS]\n"
-430 430       " -1, --single-cpu-toggle         reverse last remembered '1' state\n"
-... 431       "     --procfast                      use procfast eBPF data source (requires procfastd)\n"
-431 432       "\n"
-432 433       " -h, --help                      display this help text, then exit\n"
-433 434       " -V, --version                   output version information & exit\n"
-
+diff --git a/Makefile.am b/Makefile.am
+index 3b190f0..5d54b1c 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -306,6 +306,9 @@ library_libproc2_la_SOURCES = \
+         local/capnames.h \
+ 	library/devname.c \
+ 	library/include/devname.h \
++	library/procfast_data.c \
++	library/include/procfast_data.h \
++	library/include/procfast_client.h \
+ 	library/diskstats.c \
+ 	library/include/diskstats.h \
+ 	library/escape.c \
+diff --git a/library/include/procfast_client.h b/library/include/procfast_client.h
+new file mode 100644
+index 0000000..0aa68f4
+--- /dev/null
++++ b/library/include/procfast_client.h
+@@ -0,0 +1,637 @@
++/*
++ * procfast_client.h — Single-header C library for reading procfast metrics.
++ *
++ * Drop this file into any C/C++ project. No external dependencies
++ * beyond Linux headers. Reads data from procfast's pinned BPF maps.
++ *
++ * Usage:
++ *   struct procfast_handle *procfast = procfast_open("/sys/fs/bpf/procfast");
++ *   if (!procfast) { ... procfast not running ... }
++ *
++ *   struct procfast_cpu_data cpu;
++ *   procfast_read_cpu(procfast, &cpu);
++ *   printf("CPUs: %u\n", cpu.nr_cpus);
++ *
++ *   struct procfast_proc_stats *procs;
++ *   int n = procfast_read_procs(procfast, &procs);
++ *   for (int i = 0; i < n; i++)
++ *       printf("%d %s\n", procs[i].pid, procs[i].comm);
++ *   free(procs);
++ *
++ *   procfast_close(procfast);
++ *
++ * SPDX-License-Identifier: MIT OR Apache-2.0
++ */
++
++#ifndef PROCFAST_CLIENT_H
++#define PROCFAST_CLIENT_H
++
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <linux/bpf.h>
++#include <sys/syscall.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* ---- Data structures (must match procfast-common/src/lib.rs) ---- */
++
++#define PROCFAST_MAX_CPUS         256
++#define PROCFAST_MAX_NET_DEVS      32
++#define PROCFAST_MAX_DISKS         64
++#define PROCFAST_MAX_THERMAL_ZONES 16
++#define PROCFAST_MAX_IRQS         512
++#define PROCFAST_MAX_FDS        65536
++#define PROCFAST_MAX_FD_PATH      256
++
++struct procfast_cpu_stats {
++    uint64_t user_ns, nice_ns, system_ns, idle_ns;
++    uint64_t iowait_ns, irq_ns, softirq_ns, steal_ns;
++    uint64_t guest_ns, guest_nice_ns;
++};
++
++struct procfast_cpu_data {
++    uint64_t seq;
++    uint64_t timestamp_ns;
++    uint32_t nr_cpus;
++    uint32_t _pad;
++    struct procfast_cpu_stats total;
++    struct procfast_cpu_stats per_cpu[PROCFAST_MAX_CPUS];
++};
++
++struct procfast_mem_data {
++    uint64_t seq;
++    uint64_t timestamp_ns;
++    uint64_t total_bytes, free_bytes, available_bytes;
++    uint64_t buffers_bytes, cached_bytes;
++    uint64_t swap_total_bytes, swap_free_bytes;
++    uint64_t active_bytes, inactive_bytes;
++    uint64_t slab_reclaimable_bytes, slab_unreclaimable_bytes;
++    uint64_t dirty_bytes, writeback_bytes, shmem_bytes;
++};
++
++struct procfast_net_dev_stats {
++    uint64_t rx_bytes, tx_bytes, rx_packets, tx_packets;
++    uint64_t rx_errors, tx_errors, rx_dropped, tx_dropped;
++    char name[16];
++};
++
++struct procfast_net_data {
++    uint64_t seq;
++    uint64_t timestamp_ns;
++    uint32_t nr_devs;
++    uint32_t _pad;
++    struct procfast_net_dev_stats devs[PROCFAST_MAX_NET_DEVS];
++};
++
++struct procfast_proc_stats {
++    uint32_t pid, tgid, ppid;
++    uint8_t  state;
++    uint8_t  _pad1[3];
++    uint32_t uid, nr_threads;
++    char     comm[16];
++    uint64_t utime_ns, stime_ns, cutime_ns, cstime_ns;
++    int32_t  nice;
++    uint32_t policy, last_cpu, rt_priority;
++    uint64_t last_seen_ns, vol_ctxsw, invol_ctxsw;
++    uint64_t rss_bytes, vsize_bytes, shared_bytes;
++    uint64_t read_bytes, write_bytes;
++    uint64_t cpu_runtime_ns;
++    uint64_t start_time_ns;
++    uint64_t cgroup_id;
++};
++
++struct procfast_cgroup_stats {
++    uint64_t id;
++    uint64_t parent_id;
++    uint32_t level;
++    uint32_t nr_descendants;
++    uint64_t cpu_usage_ns;
++    uint64_t cpu_user_ns;
++    uint64_t cpu_system_ns;
++    uint64_t cpu_quota_us;
++    uint64_t cpu_period_us;
++    uint32_t cpu_weight;
++    uint32_t nr_throttled;
++    uint64_t throttled_ns;
++    uint64_t memory_current;
++    uint64_t memory_limit;
++    uint64_t memory_swap;
++    uint64_t memory_cache;
++    uint64_t memory_rss;
++    uint64_t memory_slab;
++    uint64_t memory_shmem;
++    uint64_t nr_pids;
++    uint64_t pids_limit;
++    uint64_t psi_cpu_some;
++    uint64_t psi_cpu_full;
++    uint64_t psi_mem_some;
++    uint64_t psi_mem_full;
++    uint64_t psi_io_some;
++    uint64_t psi_io_full;
++    uint8_t  frozen;
++    uint8_t  _pad1[7];
++    char     name[64];
++};
++
++struct procfast_proc_header {
++    uint64_t seq;
++    uint64_t timestamp_ns;
++    uint32_t nr_procs;
++    uint32_t _pad;
++};
++
++struct procfast_sock_info {
++    uint64_t inode;
++    uint32_t family;      /* AF_INET=2, AF_INET6=10, AF_UNIX=1 */
++    uint32_t sock_type;   /* SOCK_STREAM=1, SOCK_DGRAM=2 */
++    uint8_t  protocol;    /* IPPROTO_TCP=6, IPPROTO_UDP=17 */
++    uint8_t  state;       /* TCP_ESTABLISHED=1, TCP_LISTEN=10, etc. */
++    uint16_t _pad;
++    uint32_t uid;
++    uint32_t local_port;
++    uint32_t remote_port;
++    uint32_t local_addr4;
++    uint32_t remote_addr4;
++    uint8_t  local_addr6[16];
++    uint8_t  remote_addr6[16];
++};
++
++struct procfast_fd_info {
++    uint32_t pid;
++    uint32_t fd;
++    uint64_t open_time_ns;
++    uint64_t inode;
++    uint32_t flags;
++    uint32_t _pad;
++    char path[PROCFAST_MAX_FD_PATH];
++};
++
++/* ---- Handle ---- */
++
++struct procfast_mmap {
++    void   *addr;
++    size_t  len;
++    int     fd;
++};
++
++struct procfast_handle {
++    struct procfast_mmap cpu;
++    struct procfast_mmap mem;
++    struct procfast_mmap net;
++    struct procfast_mmap proc_header;
++    int proc_stats_fd;
++    int fd_entries_fd;
++    int sock_entries_fd;
++    int cgroup_entries_fd;
++    int available;  /* bitmask: 1=cpu, 2=mem, 4=net, 8=proc, 16=fd, 32=sock, 64=cgroup */
++};
++
++#define PROCFAST_HAS_CPU    1
++#define PROCFAST_HAS_MEM    2
++#define PROCFAST_HAS_NET    4
++#define PROCFAST_HAS_PROC   8
++#define PROCFAST_HAS_FD    16
++#define PROCFAST_HAS_SOCK  32
++#define PROCFAST_HAS_CGROUP 64
++
++/* ---- Internal helpers ---- */
++
++static inline int procfast__bpf_obj_get(const char *path) {
++    union bpf_attr attr;
++    memset(&attr, 0, sizeof(attr));
++    attr.pathname = (uint64_t)(unsigned long)path;
++    return (int)syscall(SYS_bpf, BPF_OBJ_GET, &attr, sizeof(attr));
++}
++
++static inline int procfast__open_map(const char *dir, const char *name,
++                                  struct procfast_mmap *mm, size_t value_size) {
++    char path[256];
++    snprintf(path, sizeof(path), "%s/%s", dir, name);
++
++    int fd = procfast__bpf_obj_get(path);
++    if (fd < 0) return -1;
++
++    void *addr = mmap(NULL, value_size, PROT_READ, MAP_SHARED, fd, 0);
++    if (addr == MAP_FAILED) {
++        close(fd);
++        return -1;
++    }
++
++    mm->addr = addr;
++    mm->len = value_size;
++    mm->fd = fd;
++    return 0;
++}
++
++static inline void procfast__close_map(struct procfast_mmap *mm) {
++    if (mm->addr && mm->addr != MAP_FAILED) {
++        munmap(mm->addr, mm->len);
++        mm->addr = NULL;
++    }
++    if (mm->fd >= 0) {
++        close(mm->fd);
++        mm->fd = -1;
++    }
++}
++
++/* Seqlock read: copy data while sequence counter is stable */
++static inline void procfast__seqlock_read(const void *src, void *dst, size_t len) {
++    const volatile uint64_t *seq = (const volatile uint64_t *)src;
++    for (;;) {
++        uint64_t s1 = *seq;
++        if (s1 & 1) { /* writer active */
++            __asm__ __volatile__("pause" ::: "memory");
++            continue;
++        }
++        __atomic_thread_fence(__ATOMIC_ACQUIRE);
++        memcpy(dst, (const void *)src, len);
++        __atomic_thread_fence(__ATOMIC_ACQUIRE);
++        uint64_t s2 = *seq;
++        if (s1 == s2) return;
++    }
++}
++
++/* ---- Public API ---- */
++
++/**
++ * Open a connection to procfast's pinned maps.
++ * Returns NULL if procfast daemon is not running.
++ */
++static inline struct procfast_handle *procfast_open(const char *pin_dir) {
++    if (!pin_dir) pin_dir = "/sys/fs/bpf/procfast";
++
++    struct stat st;
++    if (stat(pin_dir, &st) != 0) return NULL;
++
++    struct procfast_handle *h = (struct procfast_handle *)calloc(1, sizeof(*h));
++    if (!h) return NULL;
++
++    h->proc_stats_fd = -1;
++    h->fd_entries_fd = -1;
++    h->sock_entries_fd = -1;
++    h->cgroup_entries_fd = -1;
++    h->available = 0;
++
++    if (procfast__open_map(pin_dir, "cpu_data", &h->cpu,
++                       sizeof(struct procfast_cpu_data)) == 0)
++        h->available |= PROCFAST_HAS_CPU;
++
++    if (procfast__open_map(pin_dir, "mem_data", &h->mem,
++                       sizeof(struct procfast_mem_data)) == 0)
++        h->available |= PROCFAST_HAS_MEM;
++
++    if (procfast__open_map(pin_dir, "net_data", &h->net,
++                       sizeof(struct procfast_net_data)) == 0)
++        h->available |= PROCFAST_HAS_NET;
++
++    if (procfast__open_map(pin_dir, "proc_header", &h->proc_header,
++                       sizeof(struct procfast_proc_header)) == 0) {
++        char path[256];
++        snprintf(path, sizeof(path), "%s/proc_stats", pin_dir);
++        h->proc_stats_fd = procfast__bpf_obj_get(path);
++        if (h->proc_stats_fd >= 0)
++            h->available |= PROCFAST_HAS_PROC;
++    }
++
++    {
++        char path[256];
++        snprintf(path, sizeof(path), "%s/fd_entries", pin_dir);
++        h->fd_entries_fd = procfast__bpf_obj_get(path);
++        if (h->fd_entries_fd >= 0)
++            h->available |= PROCFAST_HAS_FD;
++    }
++
++    {
++        char path[256];
++        snprintf(path, sizeof(path), "%s/sock_entries", pin_dir);
++        h->sock_entries_fd = procfast__bpf_obj_get(path);
++        if (h->sock_entries_fd >= 0)
++            h->available |= PROCFAST_HAS_SOCK;
++    }
++
++    {
++        char path[256];
++        snprintf(path, sizeof(path), "%s/cgroup_entries", pin_dir);
++        h->cgroup_entries_fd = procfast__bpf_obj_get(path);
++        if (h->cgroup_entries_fd >= 0)
++            h->available |= PROCFAST_HAS_CGROUP;
++    }
++
++    if (h->available == 0) {
++        free(h);
++        return NULL;
++    }
++
++    return h;
++}
++
++/** Close handle and free resources. */
++static inline void procfast_close(struct procfast_handle *h) {
++    if (!h) return;
++    procfast__close_map(&h->cpu);
++    procfast__close_map(&h->mem);
++    procfast__close_map(&h->net);
++    procfast__close_map(&h->proc_header);
++    if (h->proc_stats_fd >= 0) close(h->proc_stats_fd);
++    if (h->fd_entries_fd >= 0) close(h->fd_entries_fd);
++    if (h->sock_entries_fd >= 0) close(h->sock_entries_fd);
++    if (h->cgroup_entries_fd >= 0) close(h->cgroup_entries_fd);
++    free(h);
++}
++
++/** Check if a specific data source is available. */
++static inline int procfast_has(struct procfast_handle *h, int flag) {
++    return h && (h->available & flag);
++}
++
++/** Read CPU stats (zero-copy via seqlock). Returns 0 on success. */
++static inline int procfast_read_cpu(struct procfast_handle *h, struct procfast_cpu_data *out) {
++    if (!procfast_has(h, PROCFAST_HAS_CPU)) return -1;
++    procfast__seqlock_read(h->cpu.addr, out, sizeof(*out));
++    return 0;
++}
++
++/** Read memory stats. Returns 0 on success. */
++static inline int procfast_read_mem(struct procfast_handle *h, struct procfast_mem_data *out) {
++    if (!procfast_has(h, PROCFAST_HAS_MEM)) return -1;
++    procfast__seqlock_read(h->mem.addr, out, sizeof(*out));
++    return 0;
++}
++
++/** Read network stats. Returns 0 on success. */
++static inline int procfast_read_net(struct procfast_handle *h, struct procfast_net_data *out) {
++    if (!procfast_has(h, PROCFAST_HAS_NET)) return -1;
++    procfast__seqlock_read(h->net.addr, out, sizeof(*out));
++    return 0;
++}
++
++/**
++ * Read all tracked processes via batch lookup.
++ * Allocates *out_procs (caller must free). Returns count, or -1 on error.
++ */
++static inline int procfast_read_procs(struct procfast_handle *h,
++                                   struct procfast_proc_stats **out_procs) {
++    if (!procfast_has(h, PROCFAST_HAS_PROC)) return -1;
++
++    struct procfast_proc_header hdr;
++    procfast__seqlock_read(h->proc_header.addr, &hdr, sizeof(hdr));
++
++    size_t capacity = hdr.nr_procs > 0 ? hdr.nr_procs + 64 : 1024;
++    struct procfast_proc_stats *procs = (struct procfast_proc_stats *)
++        malloc(capacity * sizeof(struct procfast_proc_stats));
++    if (!procs) return -1;
++
++    int fd = h->proc_stats_fd;
++    uint32_t key_size = sizeof(uint32_t);
++    uint32_t val_size = sizeof(struct procfast_proc_stats);
++    uint32_t batch = 512;
++
++    uint32_t *keys = (uint32_t *)malloc(batch * key_size);
++    struct procfast_proc_stats *vals = (struct procfast_proc_stats *)
++        malloc(batch * val_size);
++    if (!keys || !vals) {
++        free(keys); free(vals); free(procs);
++        return -1;
++    }
++
++    int total = 0;
++    uint64_t in_batch = 0, out_batch = 0;
++    int first = 1;
++
++    struct { uint64_t sz, elem_flags, flags; } opts = {
++        .sz = sizeof(opts), .elem_flags = 0, .flags = 0
++    };
++
++    for (;;) {
++        uint32_t count = batch;
++
++        union bpf_attr attr;
++        memset(&attr, 0, sizeof(attr));
++        attr.batch.map_fd = fd;
++        attr.batch.in_batch = first ? 0 : (uint64_t)(unsigned long)&in_batch;
++        attr.batch.out_batch = (uint64_t)(unsigned long)&out_batch;
++        attr.batch.keys = (uint64_t)(unsigned long)keys;
++        attr.batch.values = (uint64_t)(unsigned long)vals;
++        attr.batch.count = count;
++
++        int ret = (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_BATCH,
++                               &attr, sizeof(attr));
++        count = attr.batch.count;
++        first = 0;
++
++        for (uint32_t i = 0; i < count; i++) {
++            if ((size_t)total >= capacity) {
++                capacity *= 2;
++                procs = (struct procfast_proc_stats *)
++                    realloc(procs, capacity * sizeof(*procs));
++                if (!procs) { free(keys); free(vals); return -1; }
++            }
++            procs[total++] = vals[i];
++        }
++
++        in_batch = out_batch;
++        if (ret != 0) break; /* ENOENT = done */
++    }
++
++    free(keys);
++    free(vals);
++    *out_procs = procs;
++    return total;
++}
++
++/**
++ * Look up a single process by PID. Returns 0 on success, -1 if not found.
++ */
++static inline int procfast_read_proc(struct procfast_handle *h, uint32_t pid,
++                                  struct procfast_proc_stats *out) {
++    if (!procfast_has(h, PROCFAST_HAS_PROC)) return -1;
++
++    union bpf_attr attr;
++    memset(&attr, 0, sizeof(attr));
++    attr.map_fd = h->proc_stats_fd;
++    attr.key = (uint64_t)(unsigned long)&pid;
++    attr.value = (uint64_t)(unsigned long)out;
++
++    return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
++}
++
++/**
++ * Read all tracked file descriptors via batch lookup.
++ * Allocates *out_fds (caller must free). Returns count, or -1 on error.
++ */
++static inline int procfast_read_fds(struct procfast_handle *h,
++                                 struct procfast_fd_info **out_fds) {
++    if (!procfast_has(h, PROCFAST_HAS_FD)) return -1;
++
++    size_t capacity = 4096;
++    struct procfast_fd_info *fds = (struct procfast_fd_info *)
++        malloc(capacity * sizeof(struct procfast_fd_info));
++    if (!fds) return -1;
++
++    int fd = h->fd_entries_fd;
++    uint32_t batch = 512;
++
++    uint64_t *keys = (uint64_t *)malloc(batch * sizeof(uint64_t));
++    struct procfast_fd_info *vals = (struct procfast_fd_info *)
++        malloc(batch * sizeof(struct procfast_fd_info));
++    if (!keys || !vals) {
++        free(keys); free(vals); free(fds);
++        return -1;
++    }
++
++    int total = 0;
++    uint64_t in_batch = 0, out_batch = 0;
++    int first = 1;
++
++    for (;;) {
++        uint32_t count = batch;
++
++        union bpf_attr attr;
++        memset(&attr, 0, sizeof(attr));
++        attr.batch.map_fd = fd;
++        attr.batch.in_batch = first ? 0 : (uint64_t)(unsigned long)&in_batch;
++        attr.batch.out_batch = (uint64_t)(unsigned long)&out_batch;
++        attr.batch.keys = (uint64_t)(unsigned long)keys;
++        attr.batch.values = (uint64_t)(unsigned long)vals;
++        attr.batch.count = count;
++
++        int ret = (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_BATCH,
++                               &attr, sizeof(attr));
++        count = attr.batch.count;
++        first = 0;
++
++        for (uint32_t i = 0; i < count; i++) {
++            if ((size_t)total >= capacity) {
++                capacity *= 2;
++                fds = (struct procfast_fd_info *)
++                    realloc(fds, capacity * sizeof(*fds));
++                if (!fds) { free(keys); free(vals); return -1; }
++            }
++            fds[total++] = vals[i];
++        }
++
++        in_batch = out_batch;
++        if (ret != 0) break; /* ENOENT = done */
++    }
++
++    free(keys);
++    free(vals);
++    *out_fds = fds;
++    return total;
++}
++
++/**
++ * Look up a single file descriptor by PID + fd number.
++ * Returns 0 on success, -1 if not found.
++ */
++static inline int procfast_read_fd(struct procfast_handle *h, uint32_t pid,
++                                uint32_t fd_num, struct procfast_fd_info *out) {
++    if (!procfast_has(h, PROCFAST_HAS_FD)) return -1;
++
++    uint64_t key = ((uint64_t)pid << 32) | fd_num;
++
++    union bpf_attr attr;
++    memset(&attr, 0, sizeof(attr));
++    attr.map_fd = h->fd_entries_fd;
++    attr.key = (uint64_t)(unsigned long)&key;
++    attr.value = (uint64_t)(unsigned long)out;
++
++    return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
++}
++
++/**
++ * Look up socket info by inode number.
++ * Returns 0 on success, -1 if not found.
++ */
++static inline int procfast_read_sock(struct procfast_handle *h, uint64_t inode,
++                                      struct procfast_sock_info *out) {
++    if (!procfast_has(h, PROCFAST_HAS_SOCK)) return -1;
++
++    union bpf_attr attr;
++    memset(&attr, 0, sizeof(attr));
++    attr.map_fd = h->sock_entries_fd;
++    attr.key = (uint64_t)(unsigned long)&inode;
++    attr.value = (uint64_t)(unsigned long)out;
++
++    return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
++}
++
++/**
++ * Read all cgroup stats via batch lookup.
++ * Allocates *out_cgroups (caller must free). Returns count, or -1 on error.
++ */
++static inline int procfast_read_cgroups(struct procfast_handle *h,
++                                        struct procfast_cgroup_stats **out_cgroups) {
++    if (!procfast_has(h, PROCFAST_HAS_CGROUP)) return -1;
++
++    size_t capacity = 512;
++    struct procfast_cgroup_stats *cgroups = (struct procfast_cgroup_stats *)
++        malloc(capacity * sizeof(struct procfast_cgroup_stats));
++    if (!cgroups) return -1;
++
++    int fd = h->cgroup_entries_fd;
++    uint32_t batch = 256;
++
++    uint64_t *keys = (uint64_t *)malloc(batch * sizeof(uint64_t));
++    struct procfast_cgroup_stats *vals = (struct procfast_cgroup_stats *)
++        malloc(batch * sizeof(struct procfast_cgroup_stats));
++    if (!keys || !vals) {
++        free(keys); free(vals); free(cgroups);
++        return -1;
++    }
++
++    int total = 0;
++    uint64_t in_batch = 0, out_batch = 0;
++    int first = 1;
++
++    for (;;) {
++        uint32_t count = batch;
++
++        union bpf_attr attr;
++        memset(&attr, 0, sizeof(attr));
++        attr.batch.map_fd = fd;
++        attr.batch.in_batch = first ? 0 : (uint64_t)(unsigned long)&in_batch;
++        attr.batch.out_batch = (uint64_t)(unsigned long)&out_batch;
++        attr.batch.keys = (uint64_t)(unsigned long)keys;
++        attr.batch.values = (uint64_t)(unsigned long)vals;
++        attr.batch.count = count;
++
++        int ret = (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_BATCH,
++                               &attr, sizeof(attr));
++        count = attr.batch.count;
++        first = 0;
++
++        for (uint32_t i = 0; i < count; i++) {
++            if ((size_t)total >= capacity) {
++                capacity *= 2;
++                cgroups = (struct procfast_cgroup_stats *)
++                    realloc(cgroups, capacity * sizeof(*cgroups));
++                if (!cgroups) { free(keys); free(vals); return -1; }
++            }
++            cgroups[total++] = vals[i];
++        }
++
++        in_batch = out_batch;
++        if (ret != 0) break;
++    }
++
++    free(keys);
++    free(vals);
++    *out_cgroups = cgroups;
++    return total;
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PROCFAST_CLIENT_H */
+diff --git a/library/include/procfast_data.h b/library/include/procfast_data.h
+new file mode 100644
+index 0000000..ae0ec7c
+--- /dev/null
++++ b/library/include/procfast_data.h
+@@ -0,0 +1,27 @@
++/*
++ * procfast_data.h - procfast integration for libproc2
++ *
++ * Provides a global procfast handle and init/close/available functions
++ * so that stat.c, meminfo.c, and readproc.c can read from BPF maps
++ * instead of /proc when --procfast is enabled.
++ *
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ */
++
++#ifndef PROCPS_PROCFAST_DATA_H
++#define PROCPS_PROCFAST_DATA_H
++
++#include "procfast_client.h"
++
++extern struct procfast_handle *procfast_handle;
++
++/* Try to connect to the procfast daemon. Returns 1 on success, 0 on failure. */
++int procfast_data_init(void);
++
++/* Close the procfast connection and free resources. */
++void procfast_data_close(void);
++
++/* Returns 1 if procfast_handle is valid and usable. */
++int procfast_data_available(void);
++
++#endif /* PROCPS_PROCFAST_DATA_H */
+diff --git a/library/meminfo.c b/library/meminfo.c
+index 78a4be9..e9fd1f5 100644
+--- a/library/meminfo.c
++++ b/library/meminfo.c
+@@ -33,6 +33,7 @@
+ 
+ #include "procps-private.h"
+ #include "meminfo.h"
++#include "procfast_data.h"
+ 
+ 
+ #define MEMINFO_FILE  "/proc/meminfo"
+@@ -672,6 +673,48 @@ static int meminfo_read_failed (
+     // clear out the soon to be 'current' values
+     memset(&info->hist.new, 0, sizeof(struct meminfo_data));
+ 
++
++    /* procfast: read memory data from BPF maps instead of /proc/meminfo */
++    if (procfast_data_available()) {
++        struct procfast_mem_data procfast_mem;
++        if (procfast_read_mem(procfast_handle, &procfast_mem) == 0) {
++            /* procfast reports bytes; meminfo_data uses kB */
++            mHr(MemTotal)      = procfast_mem.total_bytes / 1024;
++            mHr(MemFree)       = procfast_mem.free_bytes / 1024;
++            mHr(MemAvailable)  = procfast_mem.available_bytes / 1024;
++            mHr(Buffers)       = procfast_mem.buffers_bytes / 1024;
++            mHr(Cached)        = procfast_mem.cached_bytes / 1024;
++            mHr(SwapTotal)     = procfast_mem.swap_total_bytes / 1024;
++            mHr(SwapFree)      = procfast_mem.swap_free_bytes / 1024;
++            mHr(Active)        = procfast_mem.active_bytes / 1024;
++            mHr(Inactive)      = procfast_mem.inactive_bytes / 1024;
++            mHr(SReclaimable)  = procfast_mem.slab_reclaimable_bytes / 1024;
++            mHr(SUnreclaim)    = procfast_mem.slab_unreclaimable_bytes / 1024;
++            mHr(Slab)          = mHr(SReclaimable) + mHr(SUnreclaim);
++            mHr(Dirty)         = procfast_mem.dirty_bytes / 1024;
++            mHr(Writeback)     = procfast_mem.writeback_bytes / 1024;
++            mHr(Shmem)         = procfast_mem.shmem_bytes / 1024;
++
++            if (0 == mHr(MemAvailable))
++                mHr(MemAvailable) = mHr(MemFree);
++            mHr(derived_mem_cached) = mHr(Cached) + mHr(SReclaimable);
++
++            if (mHr(MemAvailable) > mHr(MemTotal))
++                mHr(MemAvailable) = mHr(MemFree);
++            {
++                signed long mem_used = mHr(MemTotal) - mHr(MemAvailable);
++                if (mem_used < 0)
++                    mem_used = mHr(MemTotal) - mHr(MemFree);
++                mHr(derived_mem_used) = (unsigned long)mem_used;
++            }
++
++            if (mHr(SwapFree) < mHr(SwapTotal))
++                mHr(derived_swap_used) = mHr(SwapTotal) - mHr(SwapFree);
++
++            return 0;
++        }
++    }
++
+     if (-1 == info->meminfo_fd
+     && (-1 == (info->meminfo_fd = open(MEMINFO_FILE, O_RDONLY))))
+         return 1;
+diff --git a/library/pids.c b/library/pids.c
+index 8855920..65cc4a9 100644
+--- a/library/pids.c
++++ b/library/pids.c
+@@ -35,7 +35,9 @@
+ #include <sys/types.h>
+ 
+ #include "devname.h"
++#include "procfast_data.h"
+ #include "numa.h"
++#include "pwcache.h"
+ #include "readproc.h"
+ #include "wchan.h"
+ 
+@@ -1242,6 +1244,92 @@ static int pids_stacks_fetch (
+ 
+     // iterate stuff --------------------------------------
+     n_inuse = 0;
++
++    /* procfast fast path: read all processes from BPF maps in one batch call,
++       completely bypassing the /proc directory walk and all per-PID reads */
++    if (procfast_data_available()) {
++        extern char *str_none;
++        struct procfast_proc_stats *kprocs = NULL;
++        int nkprocs = procfast_read_procs(procfast_handle, &kprocs);
++        long hz = sysconf(_SC_CLK_TCK);
++        if (hz <= 0) hz = 100;
++        double ns_to_jif = (double)hz / 1e9;
++
++        for (int ki = 0; ki < nkprocs; ki++) {
++            struct procfast_proc_stats *kp = &kprocs[ki];
++            if (kp->pid <= 0 || kp->state >= 4) continue;
++
++            if (!(n_inuse < n_alloc)) {
++                n_alloc += STACKS_GROW;
++                if (!(info->fetch.anchor = realloc(info->fetch.anchor, sizeof(void *) * n_alloc))
++                || (!(ext = pids_stacks_alloc(info, STACKS_GROW))))
++                    { free(kprocs); return -1; }
++                memcpy(info->fetch.anchor + n_inuse, ext->stacks, sizeof(void *) * STACKS_GROW);
++            }
++
++            proc_t *p = &info->fetch_proc;
++            memset(p, 0, sizeof(*p));
++
++            /* Set string fields to str_none to prevent NULL dereference */
++            p->euser = p->ruser = p->suser = p->fuser
++                = p->egroup = p->rgroup = p->sgroup = p->fgroup
++                = p->supgid = p->supgrp = str_none;
++
++            p->tid = p->tgid = (int)kp->pid;
++            p->ppid = (int)kp->ppid;
++            p->euid = p->ruid = p->suid = (uid_t)kp->uid;
++            p->nlwp = kp->nr_threads > 0 ? (int)kp->nr_threads : 1;
++            p->nice = kp->nice;
++            p->rtprio = (int)kp->rt_priority;
++            if (kp->policy == 1 || kp->policy == 2) {
++                /* SCHED_FIFO=1, SCHED_RR=2: RT priority */
++                p->priority = -1 - (int)kp->rt_priority;
++            } else {
++                /* SCHED_NORMAL/OTHER: nice + 20 */
++                p->priority = kp->nice + 20;
++            }
++            p->sched = (int)kp->policy;
++            p->processor = (int)kp->last_cpu;
++            p->utime = (unsigned long long)(kp->cpu_runtime_ns * ns_to_jif);
++            p->stime = 0;
++            p->cutime = (unsigned long long)(kp->cutime_ns * ns_to_jif);
++            p->cstime = (unsigned long long)(kp->cstime_ns * ns_to_jif);
++            p->start_time = (unsigned long long)(kp->start_time_ns * ns_to_jif);
++            /* Memory fields — top uses multiple representations:
++               resident/share/size = pages (for MEM_RES_PGS, CVT via pgs2k_shift)
++               vm_rss/vm_size = KiB (for VM_RSS, VM_SIZE)
++               rss = pages (for internal use) */
++            p->resident = kp->rss_bytes / 4096;
++            p->share = kp->shared_bytes / 4096;
++            p->size = kp->vsize_bytes / 4096;
++            p->vm_rss = kp->rss_bytes / 1024;
++            p->vm_size = kp->vsize_bytes / 1024;
++            p->vm_rss_shared = kp->shared_bytes / 1024;
++            p->rss = kp->rss_bytes / 4096;
++            p->vsize = kp->vsize_bytes;
++            p->read_bytes = kp->read_bytes;
++            p->write_bytes = kp->write_bytes;
++            switch (kp->state) {
++                case 0: p->state = 'R'; break;
++                case 1: p->state = 'S'; break;
++                case 2: p->state = 'D'; break;
++                case 3: p->state = 'T'; break;
++                default: p->state = '?'; break;
++            }
++            p->cmd = kp->comm[0] ? strndup(kp->comm, 15) : strdup("?");
++            p->cmdline = strdup(p->cmd);
++            p->euser = pwcache_get_user(p->euid);
++            p->egroup = pwcache_get_group(p->egid);
++
++            if (!pids_proc_tally(info, &info->fetch.counts, p))
++                { free(kprocs); return -1; }
++            if (!pids_assign_results(info, info->fetch.anchor[n_inuse++], p))
++                { free(kprocs); return -1; }
++        }
++        free(kprocs);
++        goto procfast_done;
++    }
++
+     while (info->read_something(info->fetch_PT, &info->fetch_proc)) {
+         if (!(n_inuse < n_alloc)) {
+             n_alloc += STACKS_GROW;
+@@ -1261,6 +1349,7 @@ static int pids_stacks_fetch (
+     if (errno == ENOMEM)
+         return -1;
+ 
++procfast_done:
+     // finalize stuff -------------------------------------
+     /* note: we go to this trouble of maintaining a duplicate of the consolidated |
+              extent stacks addresses represented as our 'anchor' since these ptrs |
+@@ -1562,8 +1651,10 @@ PROCPS_EXPORT struct pids_fetch *procps_pids_reap (
+     if (info->containers_yes)
+         pids_containers_check();
+ 
+-    if (!pids_oldproc_open(&info->fetch_PT, info->oldflags))
+-        return NULL;
++    if (!procfast_data_available()) {
++        if (!pids_oldproc_open(&info->fetch_PT, info->oldflags))
++            return NULL;
++    }
+     info->read_something = which ? readeither : readproc;
+ 
+     info->boot_tics = 0;
+@@ -1572,7 +1663,8 @@ PROCPS_EXPORT struct pids_fetch *procps_pids_reap (
+ 
+     rc = pids_stacks_fetch(info);
+ 
+-    pids_oldproc_close(&info->fetch_PT);
++    if (!procfast_data_available())
++        pids_oldproc_close(&info->fetch_PT);
+     // we better have found at least 1 pid
+     return (rc > 0) ? &info->fetch.results : NULL;
+ } // end: procps_pids_reap
+diff --git a/library/procfast_data.c b/library/procfast_data.c
+new file mode 100644
+index 0000000..619aaf7
+--- /dev/null
++++ b/library/procfast_data.c
+@@ -0,0 +1,29 @@
++/*
++ * procfast_data.c - procfast integration for libproc2
++ *
++ * Global handle and init/close/available functions for procfast.
++ *
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ */
++
++#include "procfast_data.h"
++
++#include <stdio.h>
++
++struct procfast_handle *procfast_handle = NULL;
++
++int procfast_data_init(void) {
++    procfast_handle = procfast_open(NULL);  /* uses default /sys/fs/bpf/procfast */
++    return procfast_handle != NULL ? 1 : 0;
++}
++
++void procfast_data_close(void) {
++    if (procfast_handle) {
++        procfast_close(procfast_handle);
++        procfast_handle = NULL;
++    }
++}
++
++int procfast_data_available(void) {
++    return procfast_handle != NULL ? 1 : 0;
++}
+diff --git a/library/readproc.c b/library/readproc.c
+index 689fe05..16614aa 100644
+--- a/library/readproc.c
++++ b/library/readproc.c
+@@ -50,6 +50,7 @@
+ #include "misc.h"
+ #include "pwcache.h"
+ #include "readproc.h"
++#include "procfast_data.h"
+ 
+ // sometimes it's easier to do this manually, w/o gcc helping
+ #ifdef PROF
+@@ -1248,12 +1249,69 @@ static proc_t *simple_readproc(PROCTAB *restrict const PT, proc_t *restrict cons
+     p->euid = sb.st_uid;                        /* need a way to get real uid */
+     p->egid = sb.st_gid;                        /* need a way to get real gid */
+ 
++    /* procfast: try to fill basic proc fields from BPF maps */
++    if (procfast_data_available()) {
++        struct procfast_proc_stats kps;
++        if (procfast_read_proc(procfast_handle, (uint32_t)p->tid, &kps) == 0) {
++            long hz = sysconf(_SC_CLK_TCK);
++            if (hz <= 0) hz = 100;
++            double ns_to_jif = (double)hz / 1e9;
++
++            p->ppid  = (int)kps.ppid;
++            /* Use cpu_runtime_ns for accurate CPU% (tick-based utime/stime
++               update in batches causing wild CPU% swings). Put all runtime
++               in utime so top's delta calculation works correctly. */
++            p->utime = (unsigned long long)(kps.cpu_runtime_ns * ns_to_jif);
++            p->stime = 0;
++            p->cutime = (unsigned long long)(kps.cutime_ns * ns_to_jif);
++            p->cstime = (unsigned long long)(kps.cstime_ns * ns_to_jif);
++            p->start_time = (unsigned long long)(kps.start_time_ns * ns_to_jif);
++            p->nlwp = (int)kps.nr_threads;
++            p->nice = kps.nice;
++            p->processor = (int)kps.last_cpu;
++            p->vm_rss = kps.rss_bytes / 1024;
++            p->rss = kps.rss_bytes / 4096;
++            p->vsize = kps.vsize_bytes;
++            p->vm_size = kps.vsize_bytes / 1024;
++            p->euid = (uid_t)kps.uid;
++
++            /* Map procfast state to Linux /proc single-char state */
++            switch (kps.state) {
++                case 0: p->state = 'R'; break;
++                case 1: p->state = 'S'; break;
++                case 2: p->state = 'D'; break;
++                case 3: p->state = 'T'; break;
++                case 4: p->state = 'Z'; break;
++                default: p->state = '?'; break;
++            }
++
++            if (p->cmd) free(p->cmd);
++            p->cmd = strdup(kps.comm);
++
++            /* I/O stats */
++            p->read_bytes  = kps.read_bytes;
++            p->write_bytes = kps.write_bytes;
++
++            /* Resolve username from uid (cached, cheap) */
++            if (flags & PROC_FILLUSR)
++                p->euser = pwcache_get_user(p->euid);
++            if (flags & PROC_FILLGRP)
++                p->egroup = pwcache_get_group(p->egid);
++
++            /* Skip ALL /proc/[pid]/* file reads — we have everything
++               from procfast. Only cmdline is lost (we have comm instead). */
++            return p;
++        }
++    }
++
++
+     /* this attempted read of 'stat' is now unconditional to ensure a 'cmd' name
+        as a minimum. this prevents a NULL 'cmdline' pointer for kernel threads
+        in case the 'status' file is missing or not otherwise read ... */
+     if (file2str(PT->pidfd, "stat", &ub) == -1)
+         goto next_proc;
+     rc += stat2proc(ub.buf, p);
++procfast_skip_stat:
+ 
+     if (PT->hide_kernel && (p->ppid == 2 || p->tid == 2)) {
+         free_acquired(p);
+diff --git a/library/stat.c b/library/stat.c
+index d1f0cbb..beecef0 100644
+--- a/library/stat.c
++++ b/library/stat.c
+@@ -35,6 +35,7 @@
+ 
+ #include "procps-private.h"
+ #include "stat.h"
++#include "procfast_data.h"
+ 
+ 
+ #define STAT_FILE "/proc/stat"
+@@ -767,6 +768,68 @@ static int stat_read_failed (
+         info->cpus.hist.n_inuse = 0;
+     }
+ 
++
++    /* procfast: read CPU data from BPF maps instead of /proc/stat */
++    if (procfast_data_available()) {
++        struct procfast_cpu_data procfast_cpu;
++        if (procfast_read_cpu(procfast_handle, &procfast_cpu) == 0) {
++            long hz = sysconf(_SC_CLK_TCK);
++            if (hz <= 0) hz = 100;
++            double ns_to_jif = (double)hz / 1e9;
++
++            #define PROCFAST_FILL_JIFS(dst, src) do { \
++                (dst).user   = (unsigned long long)((src)->user_ns     * ns_to_jif); \
++                (dst).nice   = (unsigned long long)((src)->nice_ns     * ns_to_jif); \
++                (dst).system = (unsigned long long)((src)->system_ns   * ns_to_jif); \
++                (dst).idle   = (unsigned long long)((src)->idle_ns     * ns_to_jif); \
++                (dst).iowait = (unsigned long long)((src)->iowait_ns   * ns_to_jif); \
++                (dst).irq    = (unsigned long long)((src)->irq_ns      * ns_to_jif); \
++                (dst).sirq   = (unsigned long long)((src)->softirq_ns  * ns_to_jif); \
++                (dst).stolen = (unsigned long long)((src)->steal_ns    * ns_to_jif); \
++                (dst).guest  = (unsigned long long)((src)->guest_ns    * ns_to_jif); \
++                (dst).gnice  = (unsigned long long)((src)->guest_nice_ns * ns_to_jif); \
++            } while (0)
++
++            sum_ptr = &info->cpu_hist;
++            memcpy(&sum_ptr->old, &sum_ptr->new, sizeof(struct stat_jifs));
++            sum_ptr->id = STAT_SUMMARY_ID;
++            sum_ptr->numa_node = STAT_NODE_INVALID;
++            PROCFAST_FILL_JIFS(sum_ptr->new, &procfast_cpu.total);
++            stat_derive_unique(sum_ptr);
++
++            i = 0;
++            for (unsigned int c = 0; c < procfast_cpu.nr_cpus; c++) {
++                if (i >= info->cpus.hist.n_alloc) {
++                    info->cpus.hist.n_alloc += NEWOLD_INCR;
++                    info->cpus.hist.tics = realloc(info->cpus.hist.tics,
++                        info->cpus.hist.n_alloc * sizeof(struct hist_tic));
++                    if (!info->cpus.hist.tics)
++                        return 1;
++                }
++                cpu_ptr = info->cpus.hist.tics + i;
++                memcpy(&cpu_ptr->old, &cpu_ptr->new, sizeof(struct stat_jifs));
++                cpu_ptr->id = (int)c;
++                cpu_ptr->numa_node = STAT_NODE_INVALID;
++                cpu_ptr->count = 1;
++                PROCFAST_FILL_JIFS(cpu_ptr->new, &procfast_cpu.per_cpu[c]);
++                stat_derive_unique(cpu_ptr);
++                i++;
++            }
++
++            #undef PROCFAST_FILL_JIFS
++
++            info->cpus.total = info->cpus.hist.n_inuse = sum_ptr->count = i;
++            if (info->cpu_count_hwm != info->cpus.total) {
++                info->cpu_count_hwm = info->cpus.total;
++                stat_cores_reset(info);
++                if (!stat_cores_verify(info))
++                    return 1;
++                stat_cores_link(info);
++            }
++            return 0;
++        }
++    }
++
+     if (!info->stat_fp
+     && (!(info->stat_fp = fopen(STAT_FILE, "r"))))
+         return 1;
+diff --git a/src/top/top.c b/src/top/top.c
+index f05fcb6..1ff8bf2 100644
+--- a/src/top/top.c
++++ b/src/top/top.c
+@@ -55,6 +55,7 @@
+ #include "misc.h"
+ #include "pids.h"
+ #include "stat.h"
++#include "procfast_data.h"
+ 
+ #include "top.h"
+ #include "top_nls.h"
+@@ -4406,6 +4407,7 @@ static void parse_args (int argc, char **argv) {
+        { "version",           no_argument,       NULL, 'V' },
+        { "width",             optional_argument, NULL, 'w' },
+        { "single-cpu-toggle", no_argument,       NULL, '1' },
++       { "procfast",              no_argument,       NULL, 0x4b42 },
+        { NULL, 0, NULL, 0 }
+    };
+    float tmp_delay = FLT_MAX;
+@@ -4541,6 +4543,10 @@ static void parse_args (int argc, char **argv) {
+                error_exit(fmtmk(N_fmt(BAD_widtharg_fmt), cp));
+             Width_mode = (int)tmp;
+             continue;
++         case 0x4b42:   /* --procfast */
++            if (!procfast_data_init())
++               fprintf(stderr, "%s: --procfast: procfast daemon not available\n", Myname);
++            break;
+          default:
+             /* we'll rely on getopt for any error message while
+                forcing an EXIT_FAILURE with an empty string ... */
+diff --git a/src/top/top_nls.c b/src/top/top_nls.c
+index 342a1a8..a7603ad 100644
+--- a/src/top/top_nls.c
++++ b/src/top/top_nls.c
+@@ -428,6 +428,7 @@ static void build_norm_nlstab (void) {
+       " -u, --filter-only-euser =USER   show only processes owned by USER\n"
+       " -w, --width [=COLUMNS]          change print width [,use COLUMNS]\n"
+       " -1, --single-cpu-toggle         reverse last remembered '1' state\n"
++      "     --procfast                      use procfast eBPF data source (requires procfastd)\n"
+       "\n"
+       " -h, --help                      display this help text, then exit\n"
+       " -V, --version                   output version information & exit\n"

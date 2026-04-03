@@ -213,6 +213,17 @@ static void read_task_stats(struct procfast_proc_stats *stats,
 
 	/* Start time */
 	stats->start_time_ns = BPF_CORE_READ(task, start_boottime);
+
+	/* Cgroup v2 default hierarchy ID */
+	struct css_set *cgroups = BPF_CORE_READ(task, cgroups);
+	if (cgroups) {
+		struct cgroup *dfl_cgrp = BPF_CORE_READ(cgroups, dfl_cgrp);
+		if (dfl_cgrp) {
+			struct kernfs_node *kn = BPF_CORE_READ(dfl_cgrp, kn);
+			if (kn)
+				stats->cgroup_id = BPF_CORE_READ(kn, id);
+		}
+	}
 }
 
 static void emit_event(__u32 pid, __u32 event_type)

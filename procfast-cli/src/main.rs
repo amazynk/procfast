@@ -60,6 +60,7 @@ fn main() {
             cmd_fd(&client, pid);
         }
         "sock" => cmd_sock(&client),
+        "cgroup" => cmd_cgroup(&client),
         "ps" => cmd_ps(&client),
         "top" => {
             let delay = if args.len() >= 3 {
@@ -112,6 +113,7 @@ fn print_usage() {
     println!("  thermal         Thermal zone temperatures");
     println!("  fd [pid]        Open file descriptors (like lsof)");
     println!("  sock            TCP/UDP sockets (like ss)");
+    println!("  cgroup          Cgroup CPU and memory stats");
     println!("  ps              Process list (snapshot)");
     println!("  top [delay]     Live process view (delay: 1, 0.5, 200ms)");
     println!("  pid <pid>       Single process details");
@@ -401,6 +403,155 @@ fn cmd_sock(client: &ProcfastClient) {
             inode_to_proc.get(&s.inode).map(|(pid, _)| *pid as i64).unwrap_or(-1),
             inode_to_proc.get(&s.inode).map(|(_, name)| name.as_str()).unwrap_or("-"),
             s.inode);
+    }
+}
+
+fn cmd_cgroup(client: &ProcfastClient) {
+    let reader = client.cgroup().unwrap_or_else(|e| die(&e));
+    let mut cgroups = reader.snapshot_all();
+
+    if cgroups.is_empty() {
+        println!("No cgroup data. Run procfastd with --cgroup to enable cgroup tracking.");
+        return;
+    }
+
+    // Build path map from id/parent_id hierarchy
+    let name_map: std::collections::HashMap<u64, String> = cgroups.iter()
+        .map(|cg| (cg.id, bytes_to_str(&cg.name).to_string()))
+        .collect();
+    let parent_map: std::collections::HashMap<u64, u64> = cgroups.iter()
+        .map(|cg| (cg.id, cg.parent_id))
+        .collect();
+
+    let build_path = |id: u64| -> String {
+        let mut parts = Vec::new();
+        let mut cur = id;
+        for _ in 0..10 {
+            if let Some(name) = name_map.get(&cur) {
+                if name.is_empty() { break; }
+                parts.push(name.clone());
+            } else {
+                break;
+            }
+            if let Some(&pid) = parent_map.get(&cur) {
+                if pid == 0 || pid == cur { break; }
+                cur = pid;
+            } else {
+                break;
+            }
+        }
+        parts.reverse();
+        if parts.is_empty() { "/".to_string() } else { format!("/{}", parts.join("/")) }
+    };
+
+    // Aggregate per-process RSS/shared by cgroup_id from proc stats.
+    // This gives accurate memory breakdown since per-process mm counters
+    // are always up to date (unlike memcg vmstats which need rstat flush).
+    let mut cg_rss: std::collections::HashMap<u64, (u64, u64)> = std::collections::HashMap::new();
+    if let Ok(proc_reader) = client.proc_stats() {
+        if let Ok(procs) = proc_reader.snapshot_all() {
+            for p in &procs {
+                if p.cgroup_id > 0 {
+                    let entry = cg_rss.entry(p.cgroup_id).or_insert((0, 0));
+                    entry.0 += p.rss_bytes;    // total RSS (anon + file)
+                    entry.1 += p.shared_bytes;  // file-backed (cache)
+                }
+            }
+        }
+    }
+
+    // Sort by memory usage descending
+    cgroups.sort_by(|a, b| b.memory_current.cmp(&a.memory_current));
+
+    println!("{:<50} {:>10} {:>10} {:>10} {:>8} {:>8} {:>6}",
+        "Path", "Memory", "Cache", "RSS", "CPU", "PIDs", "Throt");
+    println!("{}", "-".repeat(108));
+
+    for cg in &cgroups {
+        let full_path = build_path(cg.id);
+        let path_str = if full_path.len() > 48 {
+            &full_path[full_path.len()-48..]
+        } else {
+            full_path.as_str()
+        };
+
+        let mem = if cg.memory_current > 0 { format_bytes(cg.memory_current) } else { "-".into() };
+        // Use per-process aggregated RSS (always accurate) over BPF vmstats
+        let (proc_rss, proc_shared) = cg_rss.get(&cg.id).copied().unwrap_or((0, 0));
+        let cache = if proc_shared > 0 { format_bytes(proc_shared) } else { "-".into() };
+        let rss = if proc_rss > proc_shared { format_bytes(proc_rss - proc_shared) } else if proc_rss > 0 { format_bytes(proc_rss) } else { "-".into() };
+        let cpu = format_duration_ns(cg.cpu_usage_ns);
+        let pids = if cg.nr_pids > 0 { format!("{}", cg.nr_pids) } else { "-".into() };
+        let throt = if cg.nr_throttled > 0 { format!("{}", cg.nr_throttled) } else { "-".into() };
+
+        println!("{:<50} {:>10} {:>10} {:>10} {:>8} {:>8} {:>6}",
+            path_str, mem, cache, rss, cpu, pids, throt);
+    }
+
+    // Summary
+    println!();
+    let total = cgroups.len();
+    let mem_limited = cgroups.iter().filter(|c| c.memory_limit > 0).count();
+    let cpu_limited = cgroups.iter().filter(|c| c.cpu_quota_us > 0).count();
+    let throttled = cgroups.iter().filter(|c| c.nr_throttled > 0).count();
+    let frozen = cgroups.iter().filter(|c| c.frozen > 0).count();
+    let has_psi = cgroups.iter().any(|c| c.psi_cpu_some > 0 || c.psi_mem_some > 0 || c.psi_io_some > 0);
+
+    println!("{total} cgroups: {mem_limited} memory-limited, {cpu_limited} cpu-limited, {throttled} throttled{}",
+        if frozen > 0 { format!(", {frozen} frozen") } else { String::new() });
+
+    if has_psi {
+        // Show top PSI offenders
+        let mut psi_sorted = cgroups.clone();
+        psi_sorted.sort_by(|a, b| {
+            let a_total = a.psi_cpu_some + a.psi_mem_some + a.psi_io_some;
+            let b_total = b.psi_cpu_some + b.psi_mem_some + b.psi_io_some;
+            b_total.cmp(&a_total)
+        });
+        let top_psi: Vec<_> = psi_sorted.iter()
+            .filter(|c| c.psi_cpu_some > 0 || c.psi_mem_some > 0 || c.psi_io_some > 0)
+            .take(5)
+            .collect();
+
+        if !top_psi.is_empty() {
+            println!();
+            println!("Top pressure (PSI some µs — cpu/mem/io):");
+            for cg in &top_psi {
+                let p = build_path(cg.id);
+                let display = if p.len() > 48 { &p[p.len()-48..] } else { p.as_str() };
+                println!("  {:<50} cpu:{:>12} mem:{:>12} io:{:>12}",
+                    display,
+                    cg.psi_cpu_some,
+                    cg.psi_mem_some,
+                    cg.psi_io_some);
+            }
+        }
+    }
+}
+
+fn format_duration_ns(ns: u64) -> String {
+    if ns == 0 {
+        return "-".to_string();
+    }
+    let secs = ns / 1_000_000_000;
+    if secs >= 3600 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m{:.1}s", secs / 60, (ns % 60_000_000_000) as f64 / 1e9)
+    } else {
+        format!("{:.2}s", ns as f64 / 1e9)
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
     }
 }
 
@@ -835,6 +986,38 @@ fn cmd_json(client: &ProcfastClient, subcmd: &str) {
             }).collect();
             json!({ "processes": list, "count": list.len() })
         }
+        "cgroup" => {
+            let reader = client.cgroup().unwrap_or_else(|e| die(&e));
+            let cgroups = reader.snapshot_all();
+            let list: Vec<_> = cgroups.iter().map(|cg| {
+                json!({
+                    "id": cg.id, "parent_id": cg.parent_id,
+                    "name": bytes_to_str(&cg.name),
+                    "level": cg.level, "nr_descendants": cg.nr_descendants,
+                    "cpu_usage_ns": cg.cpu_usage_ns,
+                    "cpu_user_ns": cg.cpu_user_ns,
+                    "cpu_system_ns": cg.cpu_system_ns,
+                    "cpu_quota_us": cg.cpu_quota_us,
+                    "cpu_period_us": cg.cpu_period_us,
+                    "cpu_weight": cg.cpu_weight,
+                    "nr_throttled": cg.nr_throttled,
+                    "throttled_ns": cg.throttled_ns,
+                    "memory_current": cg.memory_current,
+                    "memory_limit": cg.memory_limit,
+                    "memory_swap": cg.memory_swap,
+                    "nr_pids": cg.nr_pids,
+                    "pids_limit": cg.pids_limit,
+                    "psi_cpu_some": cg.psi_cpu_some,
+                    "psi_cpu_full": cg.psi_cpu_full,
+                    "psi_mem_some": cg.psi_mem_some,
+                    "psi_mem_full": cg.psi_mem_full,
+                    "psi_io_some": cg.psi_io_some,
+                    "psi_io_full": cg.psi_io_full,
+                    "frozen": cg.frozen != 0,
+                })
+            }).collect();
+            json!({ "cgroups": list, "count": list.len() })
+        }
         "status" => {
             let cpu = client.cpu().unwrap_or_else(|e| die(&e));
             let s = cpu.snapshot();
@@ -846,7 +1029,7 @@ fn cmd_json(client: &ProcfastClient, subcmd: &str) {
         }
         other => {
             eprintln!("error: unknown json subcommand '{other}'");
-            eprintln!("usage: procfast json <cpu|mem|net|disk|irq|thermal|ps|status>");
+            eprintln!("usage: procfast json <cpu|mem|net|disk|irq|thermal|ps|cgroup|status>");
             std::process::exit(1);
         }
     };
