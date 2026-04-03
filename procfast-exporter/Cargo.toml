@@ -1,0 +1,17 @@
+[package]
+name = "procfast-exporter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Prometheus exporter for procfast system metrics"
+
+[[bin]]
+name = "procfast-exporter"
+path = "src/main.rs"
+
+[dependencies]
+procfast = { path = "../procfast" }
+procfast-common = { path = "../procfast-common" }
+log = "0.4"
+env_logger = "0.11"
+tiny_http = "0.12"

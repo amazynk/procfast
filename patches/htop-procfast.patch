@@ -1,0 +1,1300 @@
+CommandLine.c --- 1/4 --- Text (6 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+24 24 
+25 25 #include "Action.h"
+26 26 #include "CRT.h"
+.. 27 #include "linux/ProcfastData.h"
+27 28 #include "DynamicColumn.h"
+28 29 #include "DynamicMeter.h"
+29 30 #include "DynamicScreen.h"
+
+CommandLine.c --- 2/4 --- Text (6 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+71           "-t --tree                 72           "-t --tree                
+..        Show the tree view (can be co ..        Show the tree view (can be co
+.. mbined with -s)\n"                   .. mbined with -s)\n"
+72           "-u --user[=USERNAME]      73           "-u --user[=USERNAME]     
+..        Show only processes for a giv ..        Show only processes for a giv
+.. en user (or $USER)\n"                .. en user (or $USER)\n"
+73           "-U --no-unicode           74           "-U --no-unicode          
+..        Do not use unicode but plain  ..        Do not use unicode but plain 
+.. ASCII\n"                             .. ASCII\n"
+74           "-V --version              75           "-V --version             
+..        Print version info\n");       ..        Print version info\n"
+..                                      76           "   --procfast            
+..                                      ..            Use procfast eBPF data so
+..                                      .. urce (requires procfastd)\n"
+..                                      77           "   --procfast-cmdline-ref
+..                                      .. resh=SECS  Refresh command lines eve
+..                                      .. ry SECS seconds\n");
+75    Platform_longOptionsUsage(name);  78    Platform_longOptionsUsage(name);
+76    printf("\n"                       79    printf("\n"
+77           "Press F1 inside %s for on 80           "Press F1 inside %s for on
+   line help.\n"                           line help.\n"
+
+CommandLine.c --- 3/4 --- Text (6 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+150 153       {"no-function-bar", no_argument,    0, 130},
+151 154       {"highlight-changes", optional_argument, 0, 'H'},
+152 155       {"readonly",   no_argument,         0, 128},
+... 156       {"procfast",       no_argument,         0, 131},
+... 157       {"procfast-cmdline-refresh", required_argument, 0, 132},
+153 158       PLATFORM_LONG_OPTIONS
+154 159       {0, 0, 0, 0}
+155 160    };
+
+CommandLine.c --- 4/4 --- Text (6 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+304 309          case 128:
+305 310             flags->readonly = true;
+306 311             break;
+... 312          case 131:
+... 313             if (!procfast_data_init()) {
+... 314                fprintf(stderr, "Warning: --procfast: failed to connect to procfast daemon (is it running?)\n");
+... 315             }
+... 316             break;
+... 317          case 132: {
+... 318             int secs = atoi(optarg);
+... 319             if (secs > 0) {
+... 320                procfast_cmdline_refresh_interval = secs;
+... 321             } else {
+... 322                fprintf(stderr, "Warning: --procfast-cmdline-refresh requires a positive number of seconds\n");
+... 323             }
+... 324             break;
+... 325          }
+307 326 
+308 327          default: {
+309 328             CommandLineStatus status;
+
+Makefile.am --- 1/2 --- Text (126 Make parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+192 192     linux/HugePageMeter.h \
+193 193     linux/IOPriority.h \
+194 194     linux/IOPriorityPanel.h \
+... 195     linux/ProcfastData.h \
+... 196     linux/procfast_client.h \
+195 197     linux/LibSensors.h \
+196 198     linux/LinuxMachine.h \
+197 199     linux/LinuxProcess.h \
+
+Makefile.am --- 2/2 --- Text (126 Make parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+219 221     linux/GPU.c \
+220 222     linux/HugePageMeter.c \
+221 223     linux/IOPriorityPanel.c \
+... 224     linux/ProcfastData.c \
+222 225     linux/LibSensors.c \
+223 226     linux/LinuxMachine.c \
+224 227     linux/LinuxProcess.c \
+
+linux/LinuxMachine.c --- 1/3 --- Text (5 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+31 31 #include "UsersTable.h"
+32 32 
+33 33 #include "linux/Compat.h"
+.. 34 #include "linux/ProcfastData.h"
+34 35 #include "linux/Platform.h" // needed for GNU/hurd to get PATH_MAX  // IWYU pragma: keep
+35 36 
+36 37 #ifdef HAVE_SENSORS_SENSORS_H
+
+linux/LinuxMachine.c --- 2/3 --- Text (5 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+129 130 
+130 131 static void LinuxMachine_scanMemoryInfo(LinuxMachine* this) {
+131 132    Machine* host = &this->super;
+... 133 
+... 134    if (procfast_data_available()) {
+... 135       struct procfast_mem_data mem;
+... 136       if (procfast_read_mem(procfast_handle, &mem) == 0) {
+... 137          /* procfast reports bytes; htop memory_t is in kB */
+... 138          host->totalMem = mem.total_bytes / 1024;
+... 139          memory_t freeMem = mem.free_bytes / 1024;
+... 140          memory_t cachedMem = mem.cached_bytes / 1024;
+... 141          memory_t buffersMem = mem.buffers_bytes / 1024;
+... 142          memory_t sreclaimableMem = mem.slab_reclaimable_bytes / 1024;
+... 143          memory_t sharedMem = mem.shmem_bytes / 1024;
+... 144          memory_t availableMem = mem.available_bytes / 1024;
+... 145 
+... 146          this->sharedMem = sharedMem;
+... 147          this->buffersMem = buffersMem;
+... 148          this->availableMem = availableMem != 0 ? MINIMUM(availableMem, host->totalMem) : freeMem;
+... 149          /* When cached/slab aren't available from procfast, derive used from
+... 150           * available (which accounts for reclaimable caches internally) */
+... 151          if (cachedMem > 0 || sreclaimableMem > 0) {
+... 152             this->cachedMem = cachedMem + sreclaimableMem - sharedMem;
+... 153             const memory_t usedDiff = freeMem + cachedMem + sreclaimableMem + buffersMem;
+... 154             this->usedMem = (host->totalMem >= usedDiff) ? host->totalMem - usedDiff : host->totalMem - freeMem;
+... 155          } else {
+... 156             /* Estimate: used = total - available */
+... 157             this->usedMem = host->totalMem - this->availableMem;
+... 158             this->cachedMem = this->availableMem - freeMem - buffersMem;
+... 159             if ((long long)this->cachedMem < 0) this->cachedMem = 0;
+... 160          }
+... 161          host->totalSwap = mem.swap_total_bytes / 1024;
+... 162          host->usedSwap = (mem.swap_total_bytes - mem.swap_free_bytes) / 1024;
+... 163          host->cachedSwap = 0;
+... 164          return;
+... 165       }
+... 166    }
+... 167 
+132 168    memory_t availableMem = 0;
+133 169    memory_t freeMem = 0;
+134 170    memory_t totalMem = 0;
+
+linux/LinuxMachine.c --- 3/3 --- Text (5 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+403    const Machine* super = &this->su 439    const Machine* super = &this->su
+... per;                                ... per;
+404                                     440 
+405    LinuxMachine_updateCPUcount(this 441    LinuxMachine_updateCPUcount(this
+... );                                  ... );
+...                                     442 
+...                                     443    if (procfast_data_available()) {
+...                                     444       struct procfast_cpu_data cpu;
+...                                     445       if (procfast_read_cpu(procfas
+...                                     ... t_handle, &cpu) == 0) {
+...                                     446          /* Convert nanoseconds to 
+...                                     ... jiffies (USER_HZ ticks) */
+...                                     447          long hz = sysconf(_SC_CLK_
+...                                     ... TCK);
+...                                     448          if (hz <= 0) hz = 100;
+...                                     449          double ns_per_jiffy = 1e9 
+...                                     ... / (double)hz;
+...                                     450 
+...                                     451          /* helper macro: convert a
+...                                     ...  procfast_cpu_stats to jiffies and 
+...                                     ... populate one CPUData entry */
+...                                     452          #define PROCFAST_FILL_CPU(
+...                                     ... idx, stats) do {                   
+...                                     ...                      \
+...                                     453             CPUData* cpuData = &(th
+...                                     ... is->cpuData[(idx)]);               
+...                                     ...                  \
+...                                     454             unsigned long long int 
+...                                     ... usertime     = (unsigned long long)
+...                                     ... ((stats)->user_ns     / ns_per_jiff
+...                                     ... y); \
+...                                     455             unsigned long long int 
+...                                     ... nicetime     = (unsigned long long)
+...                                     ... ((stats)->nice_ns     / ns_per_jiff
+...                                     ... y); \
+...                                     456             unsigned long long int 
+...                                     ... systemtime   = (unsigned long long)
+...                                     ... ((stats)->system_ns   / ns_per_jiff
+...                                     ... y); \
+...                                     457             unsigned long long int 
+...                                     ... idletime     = (unsigned long long)
+...                                     ... ((stats)->idle_ns     / ns_per_jiff
+...                                     ... y); \
+...                                     458             unsigned long long int 
+...                                     ... ioWait       = (unsigned long long)
+...                                     ... ((stats)->iowait_ns   / ns_per_jiff
+...                                     ... y); \
+...                                     459             unsigned long long int 
+...                                     ... irq          = (unsigned long long)
+...                                     ... ((stats)->irq_ns      / ns_per_jiff
+...                                     ... y); \
+...                                     460             unsigned long long int 
+...                                     ... softIrq      = (unsigned long long)
+...                                     ... ((stats)->softirq_ns  / ns_per_jiff
+...                                     ... y); \
+...                                     461             unsigned long long int 
+...                                     ... steal        = (unsigned long long)
+...                                     ... ((stats)->steal_ns    / ns_per_jiff
+...                                     ... y); \
+...                                     462             unsigned long long int 
+...                                     ... guest        = (unsigned long long)
+...                                     ... ((stats)->guest_ns    / ns_per_jiff
+...                                     ... y); \
+...                                     463             unsigned long long int 
+...                                     ... guestnice    = (unsigned long long)
+...                                     ... ((stats)->guest_nice_ns / ns_per_ji
+...                                     ... ffy); \
+...                                     464             usertime -= guest;     
+...                                     ...                                    
+...                                     ...                  \
+...                                     465             nicetime -= guestnice; 
+...                                     ...                                    
+...                                     ...                  \
+...                                     466             unsigned long long int 
+...                                     ... idlealltime    = idletime + ioWait;
+...                                     ...                  \
+...                                     467             unsigned long long int 
+...                                     ... systemalltime  = systemtime + irq +
+...                                     ...  softIrq;        \
+...                                     468             unsigned long long int 
+...                                     ... virtalltime    = guest + guestnice;
+...                                     ...                   \
+...                                     469             unsigned long long int 
+...                                     ... totaltime      = usertime + nicetim
+...                                     ... e + systemalltime + idlealltime + s
+...                                     ... teal + virtalltime; \
+...                                     470             cpuData->userPeriod    
+...                                     ...   = saturatingSub(usertime,      cp
+...                                     ... uData->userTime);      \
+...                                     471             cpuData->nicePeriod    
+...                                     ...   = saturatingSub(nicetime,      cp
+...                                     ... uData->niceTime);      \
+...                                     472             cpuData->systemPeriod  
+...                                     ...   = saturatingSub(systemtime,    cp
+...                                     ... uData->systemTime);    \
+...                                     473             cpuData->systemAllPerio
+...                                     ... d = saturatingSub(systemalltime, cp
+...                                     ... uData->systemAllTime); \
+...                                     474             cpuData->idleAllPeriod 
+...                                     ...   = saturatingSub(idlealltime,   cp
+...                                     ... uData->idleAllTime);   \
+...                                     475             cpuData->idlePeriod    
+...                                     ...   = saturatingSub(idletime,      cp
+...                                     ... uData->idleTime);      \
+...                                     476             cpuData->ioWaitPeriod  
+...                                     ...   = saturatingSub(ioWait,        cp
+...                                     ... uData->ioWaitTime);    \
+...                                     477             cpuData->irqPeriod     
+...                                     ...   = saturatingSub(irq,           cp
+...                                     ... uData->irqTime);       \
+...                                     478             cpuData->softIrqPeriod 
+...                                     ...   = saturatingSub(softIrq,      cpu
+...                                     ... Data->softIrqTime);   \
+...                                     479             cpuData->stealPeriod   
+...                                     ...   = saturatingSub(steal,         cp
+...                                     ... uData->stealTime);     \
+...                                     480             cpuData->guestPeriod   
+...                                     ...   = saturatingSub(virtalltime,   cp
+...                                     ... uData->guestTime);     \
+...                                     481             cpuData->totalPeriod   
+...                                     ...   = saturatingSub(totaltime,     cp
+...                                     ... uData->totalTime);     \
+...                                     482             cpuData->userTime      
+...                                     ... = usertime;                        
+...                                     ...                  \
+...                                     483             cpuData->niceTime      
+...                                     ... = nicetime;                        
+...                                     ...                  \
+...                                     484             cpuData->systemTime    
+...                                     ... = systemtime;                      
+...                                     ...                  \
+...                                     485             cpuData->systemAllTime 
+...                                     ... = systemalltime;                   
+...                                     ...                  \
+...                                     486             cpuData->idleAllTime   
+...                                     ... = idlealltime;                     
+...                                     ...                  \
+...                                     487             cpuData->idleTime      
+...                                     ... = idletime;                        
+...                                     ...                  \
+...                                     488             cpuData->ioWaitTime    
+...                                     ... = ioWait;                          
+...                                     ...                  \
+...                                     489             cpuData->irqTime       
+...                                     ... = irq;                             
+...                                     ...                  \
+...                                     490             cpuData->softIrqTime   
+...                                     ... = softIrq;                         
+...                                     ...                 \
+...                                     491             cpuData->stealTime     
+...                                     ... = steal;                           
+...                                     ...                  \
+...                                     492             cpuData->guestTime     
+...                                     ... = virtalltime;                     
+...                                     ...                  \
+...                                     493             cpuData->totalTime     
+...                                     ... = totaltime;                       
+...                                     ...                  \
+...                                     494          } while (0)
+...                                     495 
+...                                     496          /* index 0 = aggregate */
+...                                     497          PROCFAST_FILL_CPU(0, &cpu.
+...                                     ... total);
+...                                     498 
+...                                     499          unsigned int nrCpus = cpu.
+...                                     ... nr_cpus;
+...                                     500          if (nrCpus > super->existi
+...                                     ... ngCPUs)
+...                                     501             nrCpus = super->existin
+...                                     ... gCPUs;
+...                                     502          for (unsigned int i = 0; i
+...                                     ...  < nrCpus; i++) {
+...                                     503             PROCFAST_FILL_CPU(i + 1
+...                                     ... , &cpu.per_cpu[i]);
+...                                     504          }
+...                                     505 
+...                                     506          #undef PROCFAST_FILL_CPU
+...                                     507 
+...                                     508          this->period = (double)thi
+...                                     ... s->cpuData[0].totalPeriod / super->
+...                                     ... activeCPUs;
+...                                     509          return;
+...                                     510       }
+...                                     511    }
+406                                     512 
+407    FILE* file = fopen(PROCSTATFILE, 513    FILE* file = fopen(PROCSTATFILE,
+...  "r");                              ...  "r");
+408    if (!file)                       514    if (!file)
+409       CRT_fatalError("Cannot open " 515       CRT_fatalError("Cannot open "
+     PROCSTATFILE);                          PROCSTATFILE);
+
+linux/LinuxProcessTable.c --- 1/4 --- Text (14 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+23 23 #include <stdlib.h>
+24 24 #include <string.h>
+25 25 #include <syscall.h>
+.. 26 #include <time.h>
+26 27 #include <unistd.h>
+27 28 #include <linux/capability.h> // raw syscall, no libcap  // IWYU pragma: keep // IWYU pragma: no_include <sys/capability.h>
+28 29 #include <sys/stat.h>
+
+linux/LinuxProcessTable.c --- 2/4 --- Text (14 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+42 43 #include "linux/CGroupUtils.h"
+43 44 #include "linux/Compat.h"
+44 45 #include "linux/GPU.h"
+.. 46 #include "linux/ProcfastData.h"
+45 47 #include "linux/LinuxMachine.h"
+46 48 #include "linux/LinuxProcess.h"
+47 49 #include "linux/Platform.h" // needed for GNU/hurd to get PATH_MAX  // IWYU pragma: keep
+
+linux/LinuxProcessTable.c --- 3/4 --- Text (14 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+1948    return true;                    1950    return true;
+1949 }                                  1951 }
+1950                                    1952 
+....                                    1953 static void LinuxProcessTable_scan
+....                                    .... Procfast(LinuxProcessTable* this, 
+....                                    .... const LinuxMachine* lhost) {
+....                                    1954    ProcessTable* pt = (ProcessTabl
+....                                    .... e*) this;
+....                                    1955    Machine* host = &((LinuxMachine
+....                                    .... *)lhost)->super;
+....                                    1956 
+....                                    1957    /* Reset counters — they accumu
+....                                    .... late per scan */
+....                                    1958    pt->totalTasks = 0;
+....                                    1959    pt->userlandThreads = 0;
+....                                    1960    pt->kernelThreads = 0;
+....                                    1961    pt->runningTasks = 0;
+....                                    1962 
+....                                    1963    struct procfast_proc_stats* pro
+....                                    .... cs = NULL;
+....                                    1964    int nprocs = procfast_read_proc
+....                                    .... s(procfast_handle, &procs);
+....                                    1965    if (nprocs < 0)
+....                                    1966       return;
+....                                    1967 
+....                                    1968    long hz = sysconf(_SC_CLK_TCK);
+....                                    1969    if (hz <= 0) hz = 100;
+....                                    1970    double ns_per_jiffy = 1e9 / (do
+....                                    .... uble)hz;
+....                                    1971 
+....                                    1972    /* Check if it's time to refres
+....                                    .... h command lines */
+....                                    1973    bool procfast_cmdline_needs_ref
+....                                    .... resh = false;
+....                                    1974    if (procfast_cmdline_refresh_in
+....                                    .... terval > 0) {
+....                                    1975       static time_t last_cmdline_r
+....                                    .... efresh = 0;
+....                                    1976       time_t now = time(NULL);
+....                                    1977       if (now - last_cmdline_refre
+....                                    .... sh >= procfast_cmdline_refresh_int
+....                                    .... erval) {
+....                                    1978          procfast_cmdline_needs_re
+....                                    .... fresh = true;
+....                                    1979          last_cmdline_refresh = no
+....                                    .... w;
+....                                    1980       }
+....                                    1981    }
+....                                    1982 
+....                                    1983    for (int i = 0; i < nprocs; i++
+....                                    .... ) {
+....                                    1984       const struct procfast_proc_s
+....                                    .... tats* kp = &procs[i];
+....                                    1985       pid_t pid = (pid_t)kp->pid;
+....                                    1986 
+....                                    1987       if (pid <= 0 || kp->state >=
+....                                    ....  4) /* skip dead/zombie */
+....                                    1988          continue;
+....                                    1989 
+....                                    1990       bool preExisting;
+....                                    1991       Process* proc = ProcessTable
+....                                    .... _getProcess(pt, pid, &preExisting,
+....                                    ....  LinuxProcess_new);
+....                                    1992       LinuxProcess* lp = (LinuxPro
+....                                    .... cess*) proc;
+....                                    1993 
+....                                    1994       Process_setThreadGroup(proc,
+....                                    ....  pid);
+....                                    1995       proc->isUserlandThread = fal
+....                                    .... se;
+....                                    1996 
+....                                    1997       /* State: map procfast value
+....                                    .... s to htop ProcessState */
+....                                    1998       switch (kp->state) {
+....                                    1999          case 0: proc->state = RUN
+....                                    .... NING; break;
+....                                    2000          case 1: proc->state = SLE
+....                                    .... EPING; break;
+....                                    2001          case 2: proc->state = UNI
+....                                    .... NTERRUPTIBLE_WAIT; break;
+....                                    2002          case 3: proc->state = STO
+....                                    .... PPED; break;
+....                                    2003          default: proc->state = SL
+....                                    .... EEPING; break;
+....                                    2004       }
+....                                    2005 
+....                                    2006       Process_setParent(proc, (pid
+....                                    .... _t)kp->ppid);
+....                                    2007       proc->nlwp = kp->nr_threads 
+....                                    .... > 0 ? (long int)kp->nr_threads : 1
+....                                    .... ;
+....                                    2008       proc->nice = kp->nice;
+....                                    2009       proc->processor = (int)kp->l
+....                                    .... ast_cpu;
+....                                    2010 
+....                                    2011       /* Priority: match kernel's 
+....                                    .... task_prio() logic */
+....                                    2012       if (kp->policy == 1 || kp->p
+....                                    .... olicy == 2) {
+....                                    2013          /* SCHED_FIFO/RR: RT prio
+....                                    .... rity shown as negative */
+....                                    2014          proc->priority = -1 - (lo
+....                                    .... ng int)kp->rt_priority;
+....                                    2015       } else {
+....                                    2016          proc->priority = (long in
+....                                    .... t)kp->nice + 20;
+....                                    2017       }
+....                                    2018 
+....                                    2019       #ifdef SCHEDULER_SUPPORT
+....                                    2020       proc->scheduling_policy = (i
+....                                    .... nt)kp->policy;
+....                                    2021       #endif
+....                                    2022 
+....                                    2023       /* CPU times in jiffies */
+....                                    2024       lp->utime = (unsigned long l
+....                                    .... ong)(kp->utime_ns / ns_per_jiffy);
+....                                    2025       lp->stime = (unsigned long l
+....                                    .... ong)(kp->stime_ns / ns_per_jiffy);
+....                                    2026       lp->cutime = (unsigned long 
+....                                    .... long)(kp->cutime_ns / ns_per_jiffy
+....                                    .... );
+....                                    2027       lp->cstime = (unsigned long 
+....                                    .... long)(kp->cstime_ns / ns_per_jiffy
+....                                    .... );
+....                                    2028 
+....                                    2029       /* Memory: procfast gives by
+....                                    .... tes, htop wants kB */
+....                                    2030       proc->m_resident = (long)(kp
+....                                    .... ->rss_bytes / 1024);
+....                                    2031       proc->m_virt = (long)(kp->vs
+....                                    .... ize_bytes / 1024);
+....                                    2032       lp->m_share = (long)(kp->sha
+....                                    .... red_bytes / 1024);
+....                                    2033 
+....                                    2034       /* Context switches */
+....                                    2035       unsigned long ctxt = (unsign
+....                                    .... ed long)(kp->vol_ctxsw + kp->invol
+....                                    .... _ctxsw);
+....                                    2036       lp->ctxt_diff = (ctxt > lp->
+....                                    .... ctxt_total) ? ctxt - lp->ctxt_tota
+....                                    .... l : 0;
+....                                    2037       lp->ctxt_total = ctxt;
+....                                    2038 
+....                                    2039       /* CPU% — use cpu_runtime_ns
+....                                    ....  (accumulated from sched_stat_runt
+....                                    .... ime)
+....                                    2040        * for accurate delta-based 
+....                                    .... CPU%, avoiding tick-based utime/st
+....                                    .... ime jumps */
+....                                    2041       {
+....                                    2042          unsigned long long int ru
+....                                    .... ntime_jiffies = (unsigned long lon
+....                                    .... g)(kp->cpu_runtime_ns / ns_per_jif
+....                                    .... fy);
+....                                    2043          unsigned long long int pr
+....                                    .... ev_runtime = proc->time;
+....                                    2044          proc->time = runtime_jiff
+....                                    .... ies;
+....                                    2045          float percent_cpu = 0.0;
+....                                    2046          if (lhost->period > 0.0 &
+....                                    .... & preExisting) {
+....                                    2047             unsigned long long int
+....                                    ....  delta = saturatingSub(runtime_jif
+....                                    .... fies, prev_runtime);
+....                                    2048             float wall_period = lh
+....                                    .... ost->period / host->activeCPUs;
+....                                    2049             if (wall_period > 0.0)
+....                                    2050                percent_cpu = (floa
+....                                    .... t)delta / wall_period * 100.0;
+....                                    2051          }
+....                                    2052          proc->percent_cpu = CLAMP
+....                                    .... (percent_cpu, 0.0F, host->activeCP
+....                                    .... Us * 100.0F);
+....                                    2053       }
+....                                    2054       proc->percent_mem = host->to
+....                                    .... talMem > 0
+....                                    2055          ? proc->m_resident / (dou
+....                                    .... ble)(host->totalMem) * 100.0 : 0.0
+....                                    .... ;
+....                                    2056       Process_updateCPUFieldWidths
+....                                    .... (proc->percent_cpu);
+....                                    2057 
+....                                    2058       /* User */
+....                                    2059       if (proc->st_uid != (uid_t)k
+....                                    .... p->uid) {
+....                                    2060          proc->st_uid = (uid_t)kp-
+....                                    .... >uid;
+....                                    2061          proc->user = UsersTable_g
+....                                    .... etRef(host->usersTable, proc->st_u
+....                                    .... id);
+....                                    2062       }
+....                                    2063 
+....                                    2064       /* Start time */
+....                                    2065       if (proc->starttime_ctime ==
+....                                    ....  0 && kp->start_time_ns > 0) {
+....                                    2066          proc->starttime_ctime = l
+....                                    .... host->boottime + (time_t)(kp->star
+....                                    .... t_time_ns / 1000000000ULL);
+....                                    2067          Process_fillStarttimeBuff
+....                                    .... er(proc);
+....                                    2068       }
+....                                    2069 
+....                                    2070       /* Kernel thread detection: 
+....                                    .... ppid=2 (kthreadd) or pid=2 */
+....                                    2071       proc->isKernelThread = (kp->
+....                                    .... ppid == 2 || kp->pid == 2);
+....                                    2072       proc->isUserlandThread = fal
+....                                    .... se;
+....                                    2073 
+....                                    2074       /* Command line: read /proc/
+....                                    .... [pid]/cmdline when we don't have i
+....                                    .... t yet,
+....                                    2075        * or periodically if --proc
+....                                    .... fast-cmdline-refresh is set. */
+....                                    2076       {
+....                                    2077          bool needCmdline = !proc-
+....                                    .... >cmdline || !proc->cmdline[0];
+....                                    2078          if (!needCmdline && procf
+....                                    .... ast_cmdline_refresh_interval > 0 &
+....                                    .... & procfast_cmdline_needs_refresh) 
+....                                    .... {
+....                                    2079             needCmdline = true;
+....                                    2080          }
+....                                    2081          if (needCmdline) {
+....                                    2082             char path[64];
+....                                    2083             xSnprintf(path, sizeof
+....                                    .... (path), "/proc/%d", pid);
+....                                    2084             #ifdef HAVE_OPENAT
+....                                    2085             int procFd = open(path
+....                                    .... , O_RDONLY | O_DIRECTORY);
+....                                    2086             if (procFd >= 0) {
+....                                    2087                LinuxProcessTable_r
+....                                    .... eadCmdlineFile(proc, procFd, NULL)
+....                                    .... ;
+....                                    2088                close(procFd);
+....                                    2089             }
+....                                    2090             #endif
+....                                    2091             if (!proc->cmdline || 
+....                                    .... !proc->cmdline[0]) {
+....                                    2092                Process_updateCmdli
+....                                    .... ne(proc, kp->comm, 0, strlen(kp->c
+....                                    .... omm));
+....                                    2093             }
+....                                    2094          }
+....                                    2095       }
+....                                    2096 
+....                                    2097       if (!preExisting) {
+....                                    2098          ProcessTable_add(pt, proc
+....                                    .... );
+....                                    2099       }
+....                                    2100 
+....                                    2101       proc->super.updated = true;
+....                                    2102 
+....                                    2103       if (proc->isKernelThread) {
+....                                    2104          pt->kernelThreads++;
+....                                    2105       } else if (proc->nlwp > 1) {
+....                                    2106          /* Count extra threads pe
+....                                    .... r process. totalTasks must include
+....                                    2107           * all threads (not just 
+....                                    .... leaders) for htop's Tasks meter ma
+....                                    .... th:
+....                                    2108           * "processes = totalTask
+....                                    .... s - kernelThreads - userlandThread
+....                                    .... s" */
+....                                    2109          unsigned int extra = (uns
+....                                    .... igned int)(proc->nlwp - 1);
+....                                    2110          pt->userlandThreads += ex
+....                                    .... tra;
+....                                    2111          pt->totalTasks += extra;
+....                                    2112       }
+....                                    2113 
+....                                    2114       if (proc->state == RUNNING)
+....                                    2115          pt->runningTasks++;
+....                                    2116 
+....                                    2117       proc->super.show = true;
+....                                    2118       pt->totalTasks++; /* count t
+....                                    .... he leader */
+....                                    2119    }
+....                                    2120 
+....                                    2121    free(procs);
+....                                    2122 }
+....                                    2123 
+1951 void ProcessTable_goThroughEntries 2124 void ProcessTable_goThroughEntries
+.... (ProcessTable* super) {            .... (ProcessTable* super) {
+1952    LinuxProcessTable* this = (Linu 2125    LinuxProcessTable* this = (Linu
+.... xProcessTable*) super;             .... xProcessTable*) super;
+1953    Machine* host = super->super.ho 2126    Machine* host = super->super.ho
+.... st;                                .... st;
+1954    const Settings* settings = host 2127    const Settings* settings = host
+     ->settings;                             ->settings;
+
+linux/LinuxProcessTable.c --- 4/4 --- Text (14 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+1973 2146          engine->prevTime = engine->curTime;
+1974 2147          engine->curTime = 0;
+1975 2148       }
+.... 2149    }
+.... 2150 
+.... 2151    if (procfast_data_available()) {
+.... 2152       LinuxProcessTable_scanProcfast(this, lhost);
+.... 2153       return;
+1976 2154    }
+1977 2155 
+1978 2156    /* PROCDIR is an absolute path */
+
+linux/ProcfastData.c --- C
+ 1 /*
+ 2 htop - linux/ProcfastData.c
+ 3 Procfast integration — read system metrics from BPF maps instead of /proc.
+ 4 Released under the GNU GPLv2+.
+ 5 */
+ 6 
+ 7 #include "linux/ProcfastData.h"
+ 8 
+ 9 #include <stdio.h>
+10 
+11 struct procfast_handle* procfast_handle = NULL;
+12 int procfast_cmdline_refresh_interval = 0;
+13 
+14 int procfast_data_init(void) {
+15    procfast_handle = procfast_open(NULL);  /* uses default /sys/fs/bpf/procfast */
+16    return procfast_handle != NULL ? 1 : 0;
+17 }
+18 
+19 void procfast_data_close(void) {
+20    if (procfast_handle) {
+21       procfast_close(procfast_handle);
+22       procfast_handle = NULL;
+23    }
+24 }
+25 
+26 int procfast_data_available(void) {
+27    return procfast_handle != NULL ? 1 : 0;
+28 }
+
+linux/ProcfastData.h --- C++
+ 1 #ifndef HEADER_ProcfastData
+ 2 #define HEADER_ProcfastData
+ 3 /*
+ 4 htop - linux/ProcfastData.h
+ 5 Procfast integration — read system metrics from BPF maps instead of /proc.
+ 6 Released under the GNU GPLv2+.
+ 7 */
+ 8 
+ 9 #include "linux/procfast_client.h"
+10 
+11 extern struct procfast_handle* procfast_handle;
+12 
+13 /* Interval in seconds for refreshing /proc/[pid]/cmdline. 0 = never refresh. */
+14 extern int procfast_cmdline_refresh_interval;
+15 
+16 /* Try to connect to the procfast daemon. Returns 1 on success, 0 on failure. */
+17 int procfast_data_init(void);
+18 
+19 /* Close the procfast connection and free resources. */
+20 void procfast_data_close(void);
+21 
+22 /* Returns 1 if procfast_handle is valid and usable. */
+23 int procfast_data_available(void);
+24 
+25 #endif
+
+linux/procfast_client.h --- Text (2 C++ parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+  1 /*
+  2  * procfast_client.h — Single-header C library for reading procfast metrics.
+  3  *
+  4  * Drop this file into any C/C++ project. No external dependencies
+  5  * beyond Linux headers. Reads data from procfast's pinned BPF maps.
+  6  *
+  7  * Usage:
+  8  *   struct procfast_handle *procfast = procfast_open("/sys/fs/bpf/procfast");
+  9  *   if (!procfast) { ... procfast not running ... }
+ 10  *
+ 11  *   struct procfast_cpu_data cpu;
+ 12  *   procfast_read_cpu(procfast, &cpu);
+ 13  *   printf("CPUs: %u\n", cpu.nr_cpus);
+ 14  *
+ 15  *   struct procfast_proc_stats *procs;
+ 16  *   int n = procfast_read_procs(procfast, &procs);
+ 17  *   for (int i = 0; i < n; i++)
+ 18  *       printf("%d %s\n", procs[i].pid, procs[i].comm);
+ 19  *   free(procs);
+ 20  *
+ 21  *   procfast_close(procfast);
+ 22  *
+ 23  * SPDX-License-Identifier: MIT OR Apache-2.0
+ 24  */
+ 25 
+ 26 #ifndef PROCFAST_CLIENT_H
+ 27 #define PROCFAST_CLIENT_H
+ 28 
+ 29 #include <stdint.h>
+ 30 #include <stdio.h>
+ 31 #include <string.h>
+ 32 #include <stdlib.h>
+ 33 #include <unistd.h>
+ 34 #include <errno.h>
+ 35 #include <fcntl.h>
+ 36 #include <sys/mman.h>
+ 37 #include <sys/stat.h>
+ 38 #include <linux/bpf.h>
+ 39 #include <sys/syscall.h>
+ 40 
+ 41 #ifdef __cplusplus
+ 42 extern "C" {
+ 43 #endif
+ 44 
+ 45 /* ---- Data structures (must match procfast-common/src/lib.rs) ---- */
+ 46 
+ 47 #define PROCFAST_MAX_CPUS         256
+ 48 #define PROCFAST_MAX_NET_DEVS      32
+ 49 #define PROCFAST_MAX_DISKS         64
+ 50 #define PROCFAST_MAX_THERMAL_ZONES 16
+ 51 #define PROCFAST_MAX_IRQS         512
+ 52 #define PROCFAST_MAX_FDS        65536
+ 53 #define PROCFAST_MAX_FD_PATH      256
+ 54 
+ 55 struct procfast_cpu_stats {
+ 56     uint64_t user_ns, nice_ns, system_ns, idle_ns;
+ 57     uint64_t iowait_ns, irq_ns, softirq_ns, steal_ns;
+ 58     uint64_t guest_ns, guest_nice_ns;
+ 59 };
+ 60 
+ 61 struct procfast_cpu_data {
+ 62     uint64_t seq;
+ 63     uint64_t timestamp_ns;
+ 64     uint32_t nr_cpus;
+ 65     uint32_t _pad;
+ 66     struct procfast_cpu_stats total;
+ 67     struct procfast_cpu_stats per_cpu[PROCFAST_MAX_CPUS];
+ 68 };
+ 69 
+ 70 struct procfast_mem_data {
+ 71     uint64_t seq;
+ 72     uint64_t timestamp_ns;
+ 73     uint64_t total_bytes, free_bytes, available_bytes;
+ 74     uint64_t buffers_bytes, cached_bytes;
+ 75     uint64_t swap_total_bytes, swap_free_bytes;
+ 76     uint64_t active_bytes, inactive_bytes;
+ 77     uint64_t slab_reclaimable_bytes, slab_unreclaimable_bytes;
+ 78     uint64_t dirty_bytes, writeback_bytes, shmem_bytes;
+ 79 };
+ 80 
+ 81 struct procfast_net_dev_stats {
+ 82     uint64_t rx_bytes, tx_bytes, rx_packets, tx_packets;
+ 83     uint64_t rx_errors, tx_errors, rx_dropped, tx_dropped;
+ 84     char name[16];
+ 85 };
+ 86 
+ 87 struct procfast_net_data {
+ 88     uint64_t seq;
+ 89     uint64_t timestamp_ns;
+ 90     uint32_t nr_devs;
+ 91     uint32_t _pad;
+ 92     struct procfast_net_dev_stats devs[PROCFAST_MAX_NET_DEVS];
+ 93 };
+ 94 
+ 95 struct procfast_proc_stats {
+ 96     uint32_t pid, tgid, ppid;
+ 97     uint8_t  state;
+ 98     uint8_t  _pad1[3];
+ 99     uint32_t uid, nr_threads;
+100     char     comm[16];
+101     uint64_t utime_ns, stime_ns, cutime_ns, cstime_ns;
+102     int32_t  nice;
+103     uint32_t policy, last_cpu, rt_priority;
+104     uint64_t last_seen_ns, vol_ctxsw, invol_ctxsw;
+105     uint64_t rss_bytes, vsize_bytes, shared_bytes;
+106     uint64_t read_bytes, write_bytes;
+107     uint64_t cpu_runtime_ns;
+108     uint64_t start_time_ns;
+109 };
+110 
+111 struct procfast_proc_header {
+112     uint64_t seq;
+113     uint64_t timestamp_ns;
+114     uint32_t nr_procs;
+115     uint32_t _pad;
+116 };
+117 
+118 struct procfast_sock_info {
+119     uint64_t inode;
+120     uint32_t family;      /* AF_INET=2, AF_INET6=10, AF_UNIX=1 */
+121     uint32_t sock_type;   /* SOCK_STREAM=1, SOCK_DGRAM=2 */
+122     uint8_t  protocol;    /* IPPROTO_TCP=6, IPPROTO_UDP=17 */
+123     uint8_t  state;       /* TCP_ESTABLISHED=1, TCP_LISTEN=10, etc. */
+124     uint16_t _pad;
+125     uint32_t uid;
+126     uint32_t local_port;
+127     uint32_t remote_port;
+128     uint32_t local_addr4;
+129     uint32_t remote_addr4;
+130     uint8_t  local_addr6[16];
+131     uint8_t  remote_addr6[16];
+132 };
+133 
+134 struct procfast_fd_info {
+135     uint32_t pid;
+136     uint32_t fd;
+137     uint64_t open_time_ns;
+138     uint64_t inode;
+139     uint32_t flags;
+140     uint32_t _pad;
+141     char path[PROCFAST_MAX_FD_PATH];
+142 };
+143 
+144 /* ---- Handle ---- */
+145 
+146 struct procfast_mmap {
+147     void   *addr;
+148     size_t  len;
+149     int     fd;
+150 };
+151 
+152 struct procfast_handle {
+153     struct procfast_mmap cpu;
+154     struct procfast_mmap mem;
+155     struct procfast_mmap net;
+156     struct procfast_mmap proc_header;
+157     int proc_stats_fd;
+158     int fd_entries_fd;
+159     int sock_entries_fd;
+160     int available;  /* bitmask: 1=cpu, 2=mem, 4=net, 8=proc, 16=fd, 32=sock */
+161 };
+162 
+163 #define PROCFAST_HAS_CPU  1
+164 #define PROCFAST_HAS_MEM  2
+165 #define PROCFAST_HAS_NET  4
+166 #define PROCFAST_HAS_PROC 8
+167 #define PROCFAST_HAS_FD   16
+168 #define PROCFAST_HAS_SOCK 32
+169 
+170 /* ---- Internal helpers ---- */
+171 
+172 static inline int procfast__bpf_obj_get(const char *path) {
+173     union bpf_attr attr;
+174     memset(&attr, 0, sizeof(attr));
+175     attr.pathname = (uint64_t)(unsigned long)path;
+176     return (int)syscall(SYS_bpf, BPF_OBJ_GET, &attr, sizeof(attr));
+177 }
+178 
+179 static inline int procfast__open_map(const char *dir, const char *name,
+180                                   struct procfast_mmap *mm, size_t value_size) {
+181     char path[256];
+182     snprintf(path, sizeof(path), "%s/%s", dir, name);
+183 
+184     int fd = procfast__bpf_obj_get(path);
+185     if (fd < 0) return -1;
+186 
+187     void *addr = mmap(NULL, value_size, PROT_READ, MAP_SHARED, fd, 0);
+188     if (addr == MAP_FAILED) {
+189         close(fd);
+190         return -1;
+191     }
+192 
+193     mm->addr = addr;
+194     mm->len = value_size;
+195     mm->fd = fd;
+196     return 0;
+197 }
+198 
+199 static inline void procfast__close_map(struct procfast_mmap *mm) {
+200     if (mm->addr && mm->addr != MAP_FAILED) {
+201         munmap(mm->addr, mm->len);
+202         mm->addr = NULL;
+203     }
+204     if (mm->fd >= 0) {
+205         close(mm->fd);
+206         mm->fd = -1;
+207     }
+208 }
+209 
+210 /* Seqlock read: copy data while sequence counter is stable */
+211 static inline void procfast__seqlock_read(const void *src, void *dst, size_t len) {
+212     const volatile uint64_t *seq = (const volatile uint64_t *)src;
+213     for (;;) {
+214         uint64_t s1 = *seq;
+215         if (s1 & 1) { /* writer active */
+216             __asm__ __volatile__("pause" ::: "memory");
+217             continue;
+218         }
+219         __atomic_thread_fence(__ATOMIC_ACQUIRE);
+220         memcpy(dst, (const void *)src, len);
+221         __atomic_thread_fence(__ATOMIC_ACQUIRE);
+222         uint64_t s2 = *seq;
+223         if (s1 == s2) return;
+224     }
+225 }
+226 
+227 /* ---- Public API ---- */
+228 
+229 /**
+230  * Open a connection to procfast's pinned maps.
+231  * Returns NULL if procfast daemon is not running.
+232  */
+233 static inline struct procfast_handle *procfast_open(const char *pin_dir) {
+234     if (!pin_dir) pin_dir = "/sys/fs/bpf/procfast";
+235 
+236     struct stat st;
+237     if (stat(pin_dir, &st) != 0) return NULL;
+238 
+239     struct procfast_handle *h = (struct procfast_handle *)calloc(1, sizeof(*h));
+240     if (!h) return NULL;
+241 
+242     h->proc_stats_fd = -1;
+243     h->fd_entries_fd = -1;
+244     h->sock_entries_fd = -1;
+245     h->available = 0;
+246 
+247     if (procfast__open_map(pin_dir, "cpu_data", &h->cpu,
+248                        sizeof(struct procfast_cpu_data)) == 0)
+249         h->available |= PROCFAST_HAS_CPU;
+250 
+251     if (procfast__open_map(pin_dir, "mem_data", &h->mem,
+252                        sizeof(struct procfast_mem_data)) == 0)
+253         h->available |= PROCFAST_HAS_MEM;
+254 
+255     if (procfast__open_map(pin_dir, "net_data", &h->net,
+256                        sizeof(struct procfast_net_data)) == 0)
+257         h->available |= PROCFAST_HAS_NET;
+258 
+259     if (procfast__open_map(pin_dir, "proc_header", &h->proc_header,
+260                        sizeof(struct procfast_proc_header)) == 0) {
+261         char path[256];
+262         snprintf(path, sizeof(path), "%s/proc_stats", pin_dir);
+263         h->proc_stats_fd = procfast__bpf_obj_get(path);
+264         if (h->proc_stats_fd >= 0)
+265             h->available |= PROCFAST_HAS_PROC;
+266     }
+267 
+268     {
+269         char path[256];
+270         snprintf(path, sizeof(path), "%s/fd_entries", pin_dir);
+271         h->fd_entries_fd = procfast__bpf_obj_get(path);
+272         if (h->fd_entries_fd >= 0)
+273             h->available |= PROCFAST_HAS_FD;
+274     }
+275 
+276     {
+277         char path[256];
+278         snprintf(path, sizeof(path), "%s/sock_entries", pin_dir);
+279         h->sock_entries_fd = procfast__bpf_obj_get(path);
+280         if (h->sock_entries_fd >= 0)
+281             h->available |= PROCFAST_HAS_SOCK;
+282     }
+283 
+284     if (h->available == 0) {
+285         free(h);
+286         return NULL;
+287     }
+288 
+289     return h;
+290 }
+291 
+292 /** Close handle and free resources. */
+293 static inline void procfast_close(struct procfast_handle *h) {
+294     if (!h) return;
+295     procfast__close_map(&h->cpu);
+296     procfast__close_map(&h->mem);
+297     procfast__close_map(&h->net);
+298     procfast__close_map(&h->proc_header);
+299     if (h->proc_stats_fd >= 0) close(h->proc_stats_fd);
+300     if (h->fd_entries_fd >= 0) close(h->fd_entries_fd);
+301     if (h->sock_entries_fd >= 0) close(h->sock_entries_fd);
+302     free(h);
+303 }
+304 
+305 /** Check if a specific data source is available. */
+306 static inline int procfast_has(struct procfast_handle *h, int flag) {
+307     return h && (h->available & flag);
+308 }
+309 
+310 /** Read CPU stats (zero-copy via seqlock). Returns 0 on success. */
+311 static inline int procfast_read_cpu(struct procfast_handle *h, struct procfast_cpu_data *out) {
+312     if (!procfast_has(h, PROCFAST_HAS_CPU)) return -1;
+313     procfast__seqlock_read(h->cpu.addr, out, sizeof(*out));
+314     return 0;
+315 }
+316 
+317 /** Read memory stats. Returns 0 on success. */
+318 static inline int procfast_read_mem(struct procfast_handle *h, struct procfast_mem_data *out) {
+319     if (!procfast_has(h, PROCFAST_HAS_MEM)) return -1;
+320     procfast__seqlock_read(h->mem.addr, out, sizeof(*out));
+321     return 0;
+322 }
+323 
+324 /** Read network stats. Returns 0 on success. */
+325 static inline int procfast_read_net(struct procfast_handle *h, struct procfast_net_data *out) {
+326     if (!procfast_has(h, PROCFAST_HAS_NET)) return -1;
+327     procfast__seqlock_read(h->net.addr, out, sizeof(*out));
+328     return 0;
+329 }
+330 
+331 /**
+332  * Read all tracked processes via batch lookup.
+333  * Allocates *out_procs (caller must free). Returns count, or -1 on error.
+334  */
+335 static inline int procfast_read_procs(struct procfast_handle *h,
+336                                    struct procfast_proc_stats **out_procs) {
+337     if (!procfast_has(h, PROCFAST_HAS_PROC)) return -1;
+338 
+339     struct procfast_proc_header hdr;
+340     procfast__seqlock_read(h->proc_header.addr, &hdr, sizeof(hdr));
+341 
+342     size_t capacity = hdr.nr_procs > 0 ? hdr.nr_procs + 64 : 1024;
+343     struct procfast_proc_stats *procs = (struct procfast_proc_stats *)
+344         malloc(capacity * sizeof(struct procfast_proc_stats));
+345     if (!procs) return -1;
+346 
+347     int fd = h->proc_stats_fd;
+348     uint32_t key_size = sizeof(uint32_t);
+349     uint32_t val_size = sizeof(struct procfast_proc_stats);
+350     uint32_t batch = 512;
+351 
+352     uint32_t *keys = (uint32_t *)malloc(batch * key_size);
+353     struct procfast_proc_stats *vals = (struct procfast_proc_stats *)
+354         malloc(batch * val_size);
+355     if (!keys || !vals) {
+356         free(keys); free(vals); free(procs);
+357         return -1;
+358     }
+359 
+360     int total = 0;
+361     uint64_t in_batch = 0, out_batch = 0;
+362     int first = 1;
+363 
+364     struct { uint64_t sz, elem_flags, flags; } opts = {
+365         .sz = sizeof(opts), .elem_flags = 0, .flags = 0
+366     };
+367 
+368     for (;;) {
+369         uint32_t count = batch;
+370 
+371         union bpf_attr attr;
+372         memset(&attr, 0, sizeof(attr));
+373         attr.batch.map_fd = fd;
+374         attr.batch.in_batch = first ? 0 : (uint64_t)(unsigned long)&in_batch;
+375         attr.batch.out_batch = (uint64_t)(unsigned long)&out_batch;
+376         attr.batch.keys = (uint64_t)(unsigned long)keys;
+377         attr.batch.values = (uint64_t)(unsigned long)vals;
+378         attr.batch.count = count;
+379 
+380         int ret = (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_BATCH,
+381                                &attr, sizeof(attr));
+382         count = attr.batch.count;
+383         first = 0;
+384 
+385         for (uint32_t i = 0; i < count; i++) {
+386             if ((size_t)total >= capacity) {
+387                 capacity *= 2;
+388                 procs = (struct procfast_proc_stats *)
+389                     realloc(procs, capacity * sizeof(*procs));
+390                 if (!procs) { free(keys); free(vals); return -1; }
+391             }
+392             procs[total++] = vals[i];
+393         }
+394 
+395         in_batch = out_batch;
+396         if (ret != 0) break; /* ENOENT = done */
+397     }
+398 
+399     free(keys);
+400     free(vals);
+401     *out_procs = procs;
+402     return total;
+403 }
+404 
+405 /**
+406  * Look up a single process by PID. Returns 0 on success, -1 if not found.
+407  */
+408 static inline int procfast_read_proc(struct procfast_handle *h, uint32_t pid,
+409                                   struct procfast_proc_stats *out) {
+410     if (!procfast_has(h, PROCFAST_HAS_PROC)) return -1;
+411 
+412     union bpf_attr attr;
+413     memset(&attr, 0, sizeof(attr));
+414     attr.map_fd = h->proc_stats_fd;
+415     attr.key = (uint64_t)(unsigned long)&pid;
+416     attr.value = (uint64_t)(unsigned long)out;
+417 
+418     return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
+419 }
+420 
+421 /**
+422  * Read all tracked file descriptors via batch lookup.
+423  * Allocates *out_fds (caller must free). Returns count, or -1 on error.
+424  */
+425 static inline int procfast_read_fds(struct procfast_handle *h,
+426                                  struct procfast_fd_info **out_fds) {
+427     if (!procfast_has(h, PROCFAST_HAS_FD)) return -1;
+428 
+429     size_t capacity = 4096;
+430     struct procfast_fd_info *fds = (struct procfast_fd_info *)
+431         malloc(capacity * sizeof(struct procfast_fd_info));
+432     if (!fds) return -1;
+433 
+434     int fd = h->fd_entries_fd;
+435     uint32_t batch = 512;
+436 
+437     uint64_t *keys = (uint64_t *)malloc(batch * sizeof(uint64_t));
+438     struct procfast_fd_info *vals = (struct procfast_fd_info *)
+439         malloc(batch * sizeof(struct procfast_fd_info));
+440     if (!keys || !vals) {
+441         free(keys); free(vals); free(fds);
+442         return -1;
+443     }
+444 
+445     int total = 0;
+446     uint64_t in_batch = 0, out_batch = 0;
+447     int first = 1;
+448 
+449     for (;;) {
+450         uint32_t count = batch;
+451 
+452         union bpf_attr attr;
+453         memset(&attr, 0, sizeof(attr));
+454         attr.batch.map_fd = fd;
+455         attr.batch.in_batch = first ? 0 : (uint64_t)(unsigned long)&in_batch;
+456         attr.batch.out_batch = (uint64_t)(unsigned long)&out_batch;
+457         attr.batch.keys = (uint64_t)(unsigned long)keys;
+458         attr.batch.values = (uint64_t)(unsigned long)vals;
+459         attr.batch.count = count;
+460 
+461         int ret = (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_BATCH,
+462                                &attr, sizeof(attr));
+463         count = attr.batch.count;
+464         first = 0;
+465 
+466         for (uint32_t i = 0; i < count; i++) {
+467             if ((size_t)total >= capacity) {
+468                 capacity *= 2;
+469                 fds = (struct procfast_fd_info *)
+470                     realloc(fds, capacity * sizeof(*fds));
+471                 if (!fds) { free(keys); free(vals); return -1; }
+472             }
+473             fds[total++] = vals[i];
+474         }
+475 
+476         in_batch = out_batch;
+477         if (ret != 0) break; /* ENOENT = done */
+478     }
+479 
+480     free(keys);
+481     free(vals);
+482     *out_fds = fds;
+483     return total;
+484 }
+485 
+486 /**
+487  * Look up a single file descriptor by PID + fd number.
+488  * Returns 0 on success, -1 if not found.
+489  */
+490 static inline int procfast_read_fd(struct procfast_handle *h, uint32_t pid,
+491                                 uint32_t fd_num, struct procfast_fd_info *out) {
+492     if (!procfast_has(h, PROCFAST_HAS_FD)) return -1;
+493 
+494     uint64_t key = ((uint64_t)pid << 32) | fd_num;
+495 
+496     union bpf_attr attr;
+497     memset(&attr, 0, sizeof(attr));
+498     attr.map_fd = h->fd_entries_fd;
+499     attr.key = (uint64_t)(unsigned long)&key;
+500     attr.value = (uint64_t)(unsigned long)out;
+501 
+502     return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
+503 }
+504 
+505 /**
+506  * Look up socket info by inode number.
+507  * Returns 0 on success, -1 if not found.
+508  */
+509 static inline int procfast_read_sock(struct procfast_handle *h, uint64_t inode,
+510                                       struct procfast_sock_info *out) {
+511     if (!procfast_has(h, PROCFAST_HAS_SOCK)) return -1;
+512 
+513     union bpf_attr attr;
+514     memset(&attr, 0, sizeof(attr));
+515     attr.map_fd = h->sock_entries_fd;
+516     attr.key = (uint64_t)(unsigned long)&inode;
+517     attr.value = (uint64_t)(unsigned long)out;
+518 
+519     return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
+520 }
+521 
+522 #ifdef __cplusplus
+523 }
+524 #endif
+525 
+526 #endif /* PROCFAST_CLIENT_H */
+
+m4/ax_check_compile_flag.m4 --- Text
+ 1 # ===========================================================================
+ 2 #  https://www.gnu.org/software/autoconf-archive/ax_check_compile_flag.html
+ 3 # ===========================================================================
+ 4 #
+ 5 # SYNOPSIS
+ 6 #
+ 7 #   AX_CHECK_COMPILE_FLAG(FLAG, [ACTION-SUCCESS], [ACTION-FAILURE], [EXTRA-FLAGS], [INPUT])
+ 8 #
+ 9 # DESCRIPTION
+10 #
+11 #   Check whether the given FLAG works with the current language's compiler
+12 #   or gives an error.  (Warnings, however, are ignored)
+13 #
+14 #   ACTION-SUCCESS/ACTION-FAILURE are shell commands to execute on
+15 #   success/failure.
+16 #
+17 #   If EXTRA-FLAGS is defined, it is added to the current language's default
+18 #   flags (e.g. CFLAGS) when the check is done.  The check is thus made with
+19 #   the flags: "CFLAGS EXTRA-FLAGS FLAG".  This can for example be used to
+20 #   force the compiler to issue an error when a bad flag is given.
+21 #
+22 #   INPUT gives an alternative input source to AC_COMPILE_IFELSE.
+23 #
+24 #   NOTE: Implementation based on AX_CFLAGS_GCC_OPTION. Please keep this
+25 #   macro in sync with AX_CHECK_{PREPROC,LINK}_FLAG.
+26 #
+27 # LICENSE
+28 #
+29 #   Copyright (c) 2008 Guido U. Draheim <guidod@gmx.de>
+30 #   Copyright (c) 2011 Maarten Bosmans <mkbosmans@gmail.com>
+31 #
+32 #   Copying and distribution of this file, with or without modification, are
+33 #   permitted in any medium without royalty provided the copyright notice
+34 #   and this notice are preserved.  This file is offered as-is, without any
+35 #   warranty.
+36 
+37 #serial 11
+38 
+39 AC_DEFUN([AX_CHECK_COMPILE_FLAG],
+40 [AC_PREREQ(2.64)dnl for _AC_LANG_PREFIX and AS_VAR_IF
+41 AS_VAR_PUSHDEF([CACHEVAR],[ax_cv_check_[]_AC_LANG_ABBREV[]flags_$4_$1])dnl
+42 AC_CACHE_CHECK([whether the _AC_LANG compiler accepts $1], CACHEVAR, [
+43   ax_check_save_flags=$[]_AC_LANG_PREFIX[]FLAGS
+44   if test x"m4_case(_AC_LANG,
+45                      [C], [$GCC],
+46                      [C++], [$GXX],
+47                      [Fortran], [$GFC],
+48                      [Fortran 77], [$G77],
+49                      [Objective C], [$GOBJC],
+50                      [Objective C++], [$GOBJCXX],
+51                      [no])" = xyes ; then
+52     add_gnu_werror="-Werror"
+53   fi
+54   _AC_LANG_PREFIX[]FLAGS="$[]_AC_LANG_PREFIX[]FLAGS $4 $1 $add_gnu_werror"
+55   AC_COMPILE_IFELSE([m4_default([$5],[AC_LANG_PROGRAM()])],
+56     [AS_VAR_SET(CACHEVAR,[yes])],
+57     [AS_VAR_SET(CACHEVAR,[no])])
+58   _AC_LANG_PREFIX[]FLAGS=$ax_check_save_flags])
+59 AS_VAR_IF(CACHEVAR,yes,
+60   [m4_default([$2], :)],
+61   [m4_default([$3], :)])
+62 AS_VAR_POPDEF([CACHEVAR])dnl
+63 ])dnl AX_CHECK_COMPILE_FLAGS
+

@@ -1,0 +1,15 @@
+[package]
+name = "procfast-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for querying procfast metrics"
+
+[[bin]]
+name = "procfast"
+path = "src/main.rs"
+
+[dependencies]
+procfast-client = { path = "../procfast-client" }
+procfast-common = { path = "../procfast-common" }
+serde_json = "1"

@@ -1,0 +1,8 @@
+[workspace]
+members = ["procfast-common", "procfast", "procfast-client", "procfast-cli", "procfastd", "procfast-bench", "procfast-exporter", "procfast-lsof"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"

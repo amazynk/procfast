@@ -1,0 +1,10 @@
+[package]
+name = "procfast-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Benchmarks comparing procfast vs /proc reads"
+
+[dependencies]
+procfast = { path = "../procfast" }
+procfast-common = { path = "../procfast-common" }

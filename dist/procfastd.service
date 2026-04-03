@@ -1,0 +1,29 @@
+[Unit]
+Description=procfast metrics daemon — fast system stats via eBPF
+Documentation=https://github.com/procfast/procfast
+After=local-fs.target
+ConditionPathExists=/sys/kernel/btf/vmlinux
+
+[Service]
+Type=notify
+ExecStartPre=-/bin/rm -rf /sys/fs/bpf/procfast
+ExecStart=/usr/local/bin/procfastd
+ExecStopPost=-/bin/rm -rf /sys/fs/bpf/procfast
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=5
+
+# Minimal privileges
+User=root
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_RESOURCE
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_RESOURCE
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/sys/fs/bpf
+
+[Install]
+WantedBy=multi-user.target

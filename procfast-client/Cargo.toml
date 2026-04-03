@@ -1,0 +1,13 @@
+[package]
+name = "procfast-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unprivileged client for reading procfast metrics from pinned BPF maps"
+
+[dependencies]
+procfast-common = { path = "../procfast-common" }
+libbpf-rs = "0.24"
+bytemuck = { version = "1", features = ["derive"] }
+memmap2 = "0.9"
+thiserror = "2"

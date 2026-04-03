@@ -1,0 +1,18 @@
+[package]
+name = "procfast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "High-performance Linux system metrics via eBPF — replaces /proc and /sys reads"
+
+[dependencies]
+procfast-common = { path = "../procfast-common" }
+libbpf-rs = "0.24"
+libc = "0.2"
+memmap2 = "0.9"
+bytemuck = { version = "1", features = ["derive"] }
+thiserror = "2"
+log = "0.4"
+
+[build-dependencies]
+libbpf-cargo = "0.24"

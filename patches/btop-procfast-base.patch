@@ -1,0 +1,397 @@
+src/linux/procfast_client.h --- Text (2 C++ parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+  1 /*
+  2  * procfast_client.h — Single-header C library for reading procfast metrics.
+  3  *
+  4  * Drop this file into any C/C++ project. No external dependencies
+  5  * beyond Linux headers. Reads data from procfast's pinned BPF maps.
+  6  *
+  7  * Usage:
+  8  *   struct procfast_handle *procfast = procfast_open("/sys/fs/bpf/procfast");
+  9  *   if (!procfast) { ... procfast not running ... }
+ 10  *
+ 11  *   struct procfast_cpu_data cpu;
+ 12  *   procfast_read_cpu(procfast, &cpu);
+ 13  *   printf("CPUs: %u\n", cpu.nr_cpus);
+ 14  *
+ 15  *   struct procfast_proc_stats *procs;
+ 16  *   int n = procfast_read_procs(procfast, &procs);
+ 17  *   for (int i = 0; i < n; i++)
+ 18  *       printf("%d %s\n", procs[i].pid, procs[i].comm);
+ 19  *   free(procs);
+ 20  *
+ 21  *   procfast_close(procfast);
+ 22  *
+ 23  * SPDX-License-Identifier: MIT OR Apache-2.0
+ 24  */
+ 25 
+ 26 #ifndef PROCFAST_CLIENT_H
+ 27 #define PROCFAST_CLIENT_H
+ 28 
+ 29 #include <stdint.h>
+ 30 #include <stdio.h>
+ 31 #include <string.h>
+ 32 #include <stdlib.h>
+ 33 #include <unistd.h>
+ 34 #include <errno.h>
+ 35 #include <fcntl.h>
+ 36 #include <sys/mman.h>
+ 37 #include <sys/stat.h>
+ 38 #include <linux/bpf.h>
+ 39 #include <sys/syscall.h>
+ 40 
+ 41 #ifdef __cplusplus
+ 42 extern "C" {
+ 43 #endif
+ 44 
+ 45 /* ---- Data structures (must match procfast-common/src/lib.rs) ---- */
+ 46 
+ 47 #define PROCFAST_MAX_CPUS         256
+ 48 #define PROCFAST_MAX_NET_DEVS      32
+ 49 #define PROCFAST_MAX_DISKS         64
+ 50 #define PROCFAST_MAX_THERMAL_ZONES 16
+ 51 #define PROCFAST_MAX_IRQS         512
+ 52 
+ 53 struct procfast_cpu_stats {
+ 54     uint64_t user_ns, nice_ns, system_ns, idle_ns;
+ 55     uint64_t iowait_ns, irq_ns, softirq_ns, steal_ns;
+ 56     uint64_t guest_ns, guest_nice_ns;
+ 57 };
+ 58 
+ 59 struct procfast_cpu_data {
+ 60     uint64_t seq;
+ 61     uint64_t timestamp_ns;
+ 62     uint32_t nr_cpus;
+ 63     uint32_t _pad;
+ 64     struct procfast_cpu_stats total;
+ 65     struct procfast_cpu_stats per_cpu[PROCFAST_MAX_CPUS];
+ 66 };
+ 67 
+ 68 struct procfast_mem_data {
+ 69     uint64_t seq;
+ 70     uint64_t timestamp_ns;
+ 71     uint64_t total_bytes, free_bytes, available_bytes;
+ 72     uint64_t buffers_bytes, cached_bytes;
+ 73     uint64_t swap_total_bytes, swap_free_bytes;
+ 74     uint64_t active_bytes, inactive_bytes;
+ 75     uint64_t slab_reclaimable_bytes, slab_unreclaimable_bytes;
+ 76     uint64_t dirty_bytes, writeback_bytes, shmem_bytes;
+ 77 };
+ 78 
+ 79 struct procfast_net_dev_stats {
+ 80     uint64_t rx_bytes, tx_bytes, rx_packets, tx_packets;
+ 81     uint64_t rx_errors, tx_errors, rx_dropped, tx_dropped;
+ 82     char name[16];
+ 83 };
+ 84 
+ 85 struct procfast_net_data {
+ 86     uint64_t seq;
+ 87     uint64_t timestamp_ns;
+ 88     uint32_t nr_devs;
+ 89     uint32_t _pad;
+ 90     struct procfast_net_dev_stats devs[PROCFAST_MAX_NET_DEVS];
+ 91 };
+ 92 
+ 93 struct procfast_proc_stats {
+ 94     uint32_t pid, tgid, ppid;
+ 95     uint8_t  state;
+ 96     uint8_t  _pad1[3];
+ 97     uint32_t uid, nr_threads;
+ 98     char     comm[16];
+ 99     uint64_t utime_ns, stime_ns, cutime_ns, cstime_ns;
+100     int32_t  nice;
+101     uint32_t policy, last_cpu, _pad2;
+102     uint64_t last_seen_ns, vol_ctxsw, invol_ctxsw;
+103     uint64_t rss_bytes, vsize_bytes, shared_bytes;
+104     uint64_t read_bytes, write_bytes;
+105     uint64_t cpu_runtime_ns;
+106     uint64_t start_time_ns;
+107 };
+108 
+109 struct procfast_proc_header {
+110     uint64_t seq;
+111     uint64_t timestamp_ns;
+112     uint32_t nr_procs;
+113     uint32_t _pad;
+114 };
+115 
+116 /* ---- Handle ---- */
+117 
+118 struct procfast_mmap {
+119     void   *addr;
+120     size_t  len;
+121     int     fd;
+122 };
+123 
+124 struct procfast_handle {
+125     struct procfast_mmap cpu;
+126     struct procfast_mmap mem;
+127     struct procfast_mmap net;
+128     struct procfast_mmap proc_header;
+129     int proc_stats_fd;
+130     int available;  /* bitmask: 1=cpu, 2=mem, 4=net, 8=proc */
+131 };
+132 
+133 #define PROCFAST_HAS_CPU  1
+134 #define PROCFAST_HAS_MEM  2
+135 #define PROCFAST_HAS_NET  4
+136 #define PROCFAST_HAS_PROC 8
+137 
+138 /* ---- Internal helpers ---- */
+139 
+140 static inline int procfast__bpf_obj_get(const char *path) {
+141     union bpf_attr attr;
+142     memset(&attr, 0, sizeof(attr));
+143     attr.pathname = (uint64_t)(unsigned long)path;
+144     return (int)syscall(SYS_bpf, BPF_OBJ_GET, &attr, sizeof(attr));
+145 }
+146 
+147 static inline int procfast__open_map(const char *dir, const char *name,
+148                                   struct procfast_mmap *mm, size_t value_size) {
+149     char path[256];
+150     snprintf(path, sizeof(path), "%s/%s", dir, name);
+151 
+152     int fd = procfast__bpf_obj_get(path);
+153     if (fd < 0) return -1;
+154 
+155     void *addr = mmap(NULL, value_size, PROT_READ, MAP_SHARED, fd, 0);
+156     if (addr == MAP_FAILED) {
+157         close(fd);
+158         return -1;
+159     }
+160 
+161     mm->addr = addr;
+162     mm->len = value_size;
+163     mm->fd = fd;
+164     return 0;
+165 }
+166 
+167 static inline void procfast__close_map(struct procfast_mmap *mm) {
+168     if (mm->addr && mm->addr != MAP_FAILED) {
+169         munmap(mm->addr, mm->len);
+170         mm->addr = NULL;
+171     }
+172     if (mm->fd >= 0) {
+173         close(mm->fd);
+174         mm->fd = -1;
+175     }
+176 }
+177 
+178 /* Seqlock read: copy data while sequence counter is stable */
+179 static inline void procfast__seqlock_read(const void *src, void *dst, size_t len) {
+180     const volatile uint64_t *seq = (const volatile uint64_t *)src;
+181     for (;;) {
+182         uint64_t s1 = *seq;
+183         if (s1 & 1) { /* writer active */
+184             __asm__ __volatile__("pause" ::: "memory");
+185             continue;
+186         }
+187         __atomic_thread_fence(__ATOMIC_ACQUIRE);
+188         memcpy(dst, (const void *)src, len);
+189         __atomic_thread_fence(__ATOMIC_ACQUIRE);
+190         uint64_t s2 = *seq;
+191         if (s1 == s2) return;
+192     }
+193 }
+194 
+195 /* ---- Public API ---- */
+196 
+197 /**
+198  * Open a connection to procfast's pinned maps.
+199  * Returns NULL if procfast daemon is not running.
+200  */
+201 static inline struct procfast_handle *procfast_open(const char *pin_dir) {
+202     if (!pin_dir) pin_dir = "/sys/fs/bpf/procfast";
+203 
+204     struct stat st;
+205     if (stat(pin_dir, &st) != 0) return NULL;
+206 
+207     struct procfast_handle *h = (struct procfast_handle *)calloc(1, sizeof(*h));
+208     if (!h) return NULL;
+209 
+210     h->proc_stats_fd = -1;
+211     h->available = 0;
+212 
+213     if (procfast__open_map(pin_dir, "cpu_data", &h->cpu,
+214                        sizeof(struct procfast_cpu_data)) == 0)
+215         h->available |= PROCFAST_HAS_CPU;
+216 
+217     if (procfast__open_map(pin_dir, "mem_data", &h->mem,
+218                        sizeof(struct procfast_mem_data)) == 0)
+219         h->available |= PROCFAST_HAS_MEM;
+220 
+221     if (procfast__open_map(pin_dir, "net_data", &h->net,
+222                        sizeof(struct procfast_net_data)) == 0)
+223         h->available |= PROCFAST_HAS_NET;
+224 
+225     if (procfast__open_map(pin_dir, "proc_header", &h->proc_header,
+226                        sizeof(struct procfast_proc_header)) == 0) {
+227         char path[256];
+228         snprintf(path, sizeof(path), "%s/proc_stats", pin_dir);
+229         h->proc_stats_fd = procfast__bpf_obj_get(path);
+230         if (h->proc_stats_fd >= 0)
+231             h->available |= PROCFAST_HAS_PROC;
+232     }
+233 
+234     if (h->available == 0) {
+235         free(h);
+236         return NULL;
+237     }
+238 
+239     return h;
+240 }
+241 
+242 /** Close handle and free resources. */
+243 static inline void procfast_close(struct procfast_handle *h) {
+244     if (!h) return;
+245     procfast__close_map(&h->cpu);
+246     procfast__close_map(&h->mem);
+247     procfast__close_map(&h->net);
+248     procfast__close_map(&h->proc_header);
+249     if (h->proc_stats_fd >= 0) close(h->proc_stats_fd);
+250     free(h);
+251 }
+252 
+253 /** Check if a specific data source is available. */
+254 static inline int procfast_has(struct procfast_handle *h, int flag) {
+255     return h && (h->available & flag);
+256 }
+257 
+258 /** Read CPU stats (zero-copy via seqlock). Returns 0 on success. */
+259 static inline int procfast_read_cpu(struct procfast_handle *h, struct procfast_cpu_data *out) {
+260     if (!procfast_has(h, PROCFAST_HAS_CPU)) return -1;
+261     procfast__seqlock_read(h->cpu.addr, out, sizeof(*out));
+262     return 0;
+263 }
+264 
+265 /** Read memory stats. Returns 0 on success. */
+266 static inline int procfast_read_mem(struct procfast_handle *h, struct procfast_mem_data *out) {
+267     if (!procfast_has(h, PROCFAST_HAS_MEM)) return -1;
+268     procfast__seqlock_read(h->mem.addr, out, sizeof(*out));
+269     return 0;
+270 }
+271 
+272 /** Read network stats. Returns 0 on success. */
+273 static inline int procfast_read_net(struct procfast_handle *h, struct procfast_net_data *out) {
+274     if (!procfast_has(h, PROCFAST_HAS_NET)) return -1;
+275     procfast__seqlock_read(h->net.addr, out, sizeof(*out));
+276     return 0;
+277 }
+278 
+279 /**
+280  * Read all tracked processes via batch lookup.
+281  * Allocates *out_procs (caller must free). Returns count, or -1 on error.
+282  */
+283 static inline int procfast_read_procs(struct procfast_handle *h,
+284                                    struct procfast_proc_stats **out_procs) {
+285     if (!procfast_has(h, PROCFAST_HAS_PROC)) return -1;
+286 
+287     struct procfast_proc_header hdr;
+288     procfast__seqlock_read(h->proc_header.addr, &hdr, sizeof(hdr));
+289 
+290     size_t capacity = hdr.nr_procs > 0 ? hdr.nr_procs + 64 : 1024;
+291     struct procfast_proc_stats *procs = (struct procfast_proc_stats *)
+292         malloc(capacity * sizeof(struct procfast_proc_stats));
+293     if (!procs) return -1;
+294 
+295     int fd = h->proc_stats_fd;
+296     uint32_t key_size = sizeof(uint32_t);
+297     uint32_t val_size = sizeof(struct procfast_proc_stats);
+298     uint32_t batch = 512;
+299 
+300     uint32_t *keys = (uint32_t *)malloc(batch * key_size);
+301     struct procfast_proc_stats *vals = (struct procfast_proc_stats *)
+302         malloc(batch * val_size);
+303     if (!keys || !vals) {
+304         free(keys); free(vals); free(procs);
+305         return -1;
+306     }
+307 
+308     int total = 0;
+309     uint64_t in_batch = 0, out_batch = 0;
+310     int first = 1;
+311 
+312     struct { uint64_t sz, elem_flags, flags; } opts = {
+313         .sz = sizeof(opts), .elem_flags = 0, .flags = 0
+314     };
+315 
+316     for (;;) {
+317         uint32_t count = batch;
+318 
+319         union bpf_attr attr;
+320         memset(&attr, 0, sizeof(attr));
+321         attr.batch.map_fd = fd;
+322         attr.batch.in_batch = first ? 0 : (uint64_t)(unsigned long)&in_batch;
+323         attr.batch.out_batch = (uint64_t)(unsigned long)&out_batch;
+324         attr.batch.keys = (uint64_t)(unsigned long)keys;
+325         attr.batch.values = (uint64_t)(unsigned long)vals;
+326         attr.batch.count = count;
+327 
+328         int ret = (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_BATCH,
+329                                &attr, sizeof(attr));
+330         count = attr.batch.count;
+331         first = 0;
+332 
+333         for (uint32_t i = 0; i < count; i++) {
+334             if ((size_t)total >= capacity) {
+335                 capacity *= 2;
+336                 procs = (struct procfast_proc_stats *)
+337                     realloc(procs, capacity * sizeof(*procs));
+338                 if (!procs) { free(keys); free(vals); return -1; }
+339             }
+340             procs[total++] = vals[i];
+341         }
+342 
+343         in_batch = out_batch;
+344         if (ret != 0) break; /* ENOENT = done */
+345     }
+346 
+347     free(keys);
+348     free(vals);
+349     *out_procs = procs;
+350     return total;
+351 }
+352 
+353 /**
+354  * Look up a single process by PID. Returns 0 on success, -1 if not found.
+355  */
+356 static inline int procfast_read_proc(struct procfast_handle *h, uint32_t pid,
+357                                   struct procfast_proc_stats *out) {
+358     if (!procfast_has(h, PROCFAST_HAS_PROC)) return -1;
+359 
+360     union bpf_attr attr;
+361     memset(&attr, 0, sizeof(attr));
+362     attr.map_fd = h->proc_stats_fd;
+363     attr.key = (uint64_t)(unsigned long)&pid;
+364     attr.value = (uint64_t)(unsigned long)out;
+365 
+366     return (int)syscall(SYS_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
+367 }
+368 
+369 #ifdef __cplusplus
+370 }
+371 #endif
+372 
+373 #endif /* PROCFAST_CLIENT_H */
+
+src/linux/procfast_data.hpp --- C++
+ 1 #pragma once
+ 2 
+ 3 extern "C" {
+ 4 #include "procfast_client.h"
+ 5 }
+ 6 
+ 7 namespace Procfast {
+ 8     inline struct procfast_handle *handle = nullptr;
+ 9 
+10     inline bool init() {
+11         handle = procfast_open(nullptr);
+12         return handle != nullptr;
+13     }
+14 
+15     inline void close() {
+16         if (handle) { procfast_close(handle); handle = nullptr; }
+17     }
+18 
+19     inline bool available() { return handle != nullptr; }
+20 }
+

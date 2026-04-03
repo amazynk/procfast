@@ -1,0 +1,15 @@
+[package]
+name = "procfast-lsof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fast lsof replacement powered by eBPF — lists open files via procfast"
+
+[[bin]]
+name = "procfast-lsof"
+path = "src/main.rs"
+
+[dependencies]
+procfast = { path = "../procfast" }
+procfast-common = { path = "../procfast-common" }
+serde_json = "1"
