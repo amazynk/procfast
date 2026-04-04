@@ -55,6 +55,8 @@ Socket speedup scales with connection count — `/proc/net/tcp` walks the entire
 
 The patched tools produce output matching their normal mode. `top --procfast` shows the same PRI, NI, VIRT, RES, SHR, %CPU, %MEM columns. `lsof -B` shows the same TYPE, DEVICE, SIZE/OFF, NODE, NAME columns. The difference is what happens underneath.
 
+An [LD_PRELOAD library](procfast-preload/README.md) is also available for testing with unmodified binaries (`LD_PRELOAD=libprocfast_preload.so top`). It intercepts `/proc` reads and serves data from BPF maps, eliminating 99.6% of syscalls. However, it must format binary data back into `/proc`-compatible text, which the tool then parses back into numbers — a round trip that limits the speedup to ~10%. The native patches avoid this entirely by reading binary data directly, which is why they're 3-5x faster. The preload is useful mainly for testing and for tools that can't be patched.
+
 ### Architecture
 
 ```
@@ -153,6 +155,7 @@ sudo ./tests/integration.sh
 | `procfast-exporter` | Prometheus metrics exporter |
 | `procfast-lsof` | Standalone fast lsof replacement |
 | `procfast-native` | Single-header C client library |
+| `procfast-preload` | LD_PRELOAD library for unmodified binaries ([docs](procfast-preload/README.md)) |
 | `patches/` | Patches for top, htop, btop, lsof |
 
 ### Beyond top and lsof

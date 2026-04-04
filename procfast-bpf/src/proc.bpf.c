@@ -277,12 +277,10 @@ int BPF_PROG(procfast_sched_switch, _Bool preempt,
 	}
 
 	if (stats) {
-		stats->utime_ns = BPF_CORE_READ(prev, utime);
-		stats->stime_ns = BPF_CORE_READ(prev, stime);
-		stats->vol_ctxsw = BPF_CORE_READ(prev, nvcsw);
-		stats->invol_ctxsw = BPF_CORE_READ(prev, nivcsw);
-
-		/* Map task_struct __state to our simplified state enum */
+		/* utime/stime/ctxsw are tick-based (~4ms resolution).
+		 * Reading them on every context switch (~10k/sec) is wasteful.
+		 * They're refreshed by the timer callback instead.
+		 * Here we only update state (needed for display accuracy). */
 		unsigned int task_state = BPF_CORE_READ(prev, __state);
 		if (task_state == 0)
 			stats->state = 0; /* TASK_RUNNING */
@@ -429,6 +427,30 @@ static __u64 reap_dead_procs(struct bpf_map *map, __u32 *pid,
 	if (stats->state >= 4 && stats->last_seen_ns < ctx->deadline) {
 		bpf_map_delete_elem(map, pid);
 		ctx->reaped++;
+		return 0;
+	}
+
+	/* Refresh tick-based fields (utime/stime/ctxsw) that were moved
+	 * out of the hot sched_switch path. These update at ~250Hz per
+	 * task, so refreshing at the timer interval (100ms) is sufficient.
+	 * We look up the task via pid → task_struct using bpf_task_from_pid. */
+	struct task_struct *task = bpf_task_from_pid(*pid);
+	if (task) {
+		stats->utime_ns = BPF_CORE_READ(task, utime);
+		stats->stime_ns = BPF_CORE_READ(task, stime);
+		stats->vol_ctxsw = BPF_CORE_READ(task, nvcsw);
+		stats->invol_ctxsw = BPF_CORE_READ(task, nivcsw);
+
+		/* Also refresh RSS while we have the task */
+		struct mm_struct *mm = BPF_CORE_READ(task, mm);
+		if (mm) {
+			long rss_file = BPF_CORE_READ(mm, rss_stat[MM_FILEPAGES].count);
+			long rss_anon = BPF_CORE_READ(mm, rss_stat[MM_ANONPAGES].count);
+			stats->rss_bytes = (rss_file + rss_anon) * 4096ULL;
+			stats->shared_bytes = rss_file * 4096ULL;
+		}
+
+		bpf_task_release(task);
 	}
 
 	return 0;
